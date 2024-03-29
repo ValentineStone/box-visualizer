@@ -17,167 +17,9 @@
 #define PI_FL  3.141592f
 #endif
 
-struct float3 {
-    float x = 0, y = 0, z = 0;
-    float3 operator*(float t) {
-        return { x * t, y * t, z * t };
-    }
-    float3 operator-(float t) {
-        return { x - t, y - t, z - t };
-    }
-    void operator*=(float t) {
-        x = x * t;
-        y = y * t;
-        z = z * t;
-    }
-    void operator=(float3 other) {
-        x = other.x;
-        y = other.y;
-        z = other.z;
-    }
-    void add(float t1, float t2, float t3) {
-        x += t1;
-        y += t2;
-        z += t3;
-    }
-    float3 to_deg() {
-        float3 deg;
-        deg.x = x * 180 / PI;
-        deg.y = y * 180 / PI;
-        deg.z = z * 180 / PI;
-        return deg;
-    }
-    float3 to_rad() {
-        float3 deg;
-        deg.x = x * PI / 180;
-        deg.y = y * PI / 180;
-        deg.z = z * PI / 180;
-        return deg;
-    }
-
-    QString toString() {
-        return "(x=" + QString::number(x) + ",y=" + QString::number(y) + ",z=" + QString::number(z) + ")";
-    }
-};
-
-struct rotation_estimator_t
-{
-    // theta is the angle of camera rotation in x, y and z components
-    float3 theta;
-    std::mutex theta_mtx;
-    /* alpha indicates the part that gyro and accelerometer take in computation of theta; higher alpha gives more weight to gyro, but too high
-    values cause drift; lower alpha gives more weight to accelerometer, which is more sensitive to disturbances */
-    float alpha = 0.98f;
-    bool firstGyro = true;
-    bool firstAccel = true;
-    // Keeps the arrival time of previous gyro frame
-    double last_ts_gyro = 0;
-
-    // Function to calculate the change in angle of motion based on data from gyro
-    void process_gyro(rs2_vector gyro_data, double ts)
-    {
-        if (firstGyro) // On the first iteration, use only data from accelerometer to set the camera's initial position
-        {
-            firstGyro = false;
-            last_ts_gyro = ts;
-            return;
-        }
-        // Holds the change in angle, as calculated from gyro
-        float3 gyro_angle;
-
-        // Initialize gyro_angle with data from gyro
-        gyro_angle.x = gyro_data.x; // Pitch
-        gyro_angle.y = gyro_data.y; // Yaw
-        gyro_angle.z = gyro_data.z; // Roll
-
-        // Compute the difference between arrival times of previous and current gyro frames
-        double dt_gyro = (ts - last_ts_gyro) / 1000.0;
-        last_ts_gyro = ts;
-
-        // Change in angle equals gyro measures * time passed since last measurement
-        gyro_angle = gyro_angle * static_cast<float>(dt_gyro);
-
-        // Apply the calculated change of angle to the current angle (theta)
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        theta.add(-gyro_angle.z, -gyro_angle.y, gyro_angle.x);
-    }
-
-    void process_accel(rs2_vector accel_data)
-    {
-        // Holds the angle as calculated from accelerometer data
-        float3 accel_angle;
-
-        // Calculate rotation angle from accelerometer data
-        accel_angle.z = atan2(accel_data.y, accel_data.z);
-        accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z));
-
-        // If it is the first iteration, set initial pose of camera according to accelerometer data (note the different handling for Y axis)
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        if (firstAccel)
-        {
-            firstAccel = false;
-            theta = accel_angle;
-            // Since we can't infer the angle around Y axis using accelerometer data, we'll use PI as a convetion for the initial pose
-            theta.y = PI_FL;
-        }
-        else
-        {
-            /*
-            Apply Complementary Filter:
-                - high-pass filter = theta * alpha:  allows short-duration signals to pass through while filtering out signals
-                  that are steady over time, is used to cancel out drift.
-                - low-pass filter = accel * (1- alpha): lets through long term changes, filtering out short term fluctuations
-            */
-            theta.x = theta.x * alpha + accel_angle.x * (1 - alpha);
-            theta.z = theta.z * alpha + accel_angle.z * (1 - alpha);
-        }
-    }
-
-    // Returns the current rotation angle
-    float3 get_theta()
-    {
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        return theta;
-    }
-};
-
-struct point_t {
-    float x;
-    float y;
-    float z;
-    QString toString() {
-        return QString::number(x) + ',' + QString::number(y) + ',' + QString::number(z);
-    }
-    point_t& rotate(float a, float b, float c) {
-        float x = this->x;
-        float y = this->y;
-        float z = this->z;
-
-        float sinA = sin(a);
-        float cosA = cos(a);
-        float sinB = sin(b);
-        float cosB = cos(b);
-        float sinC = sin(c);
-        float cosC = cos(c);
-
-        /*
-        this->x = x*cosB*cosC - y*sinC*cosB + z*sinB;
-        this->y = x*(sinA*sinB*cosC+sinC*cosA) - y*(sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB;
-        this->z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB;
-        */
-
-
-        this->x = x*cosB*cosC - y*sinC*cosB + z*sinB;
-        this->y = x*(sinA*sinB*cosC+sinC*cosA) + y*(-sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB;
-        this->z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB;
-
-        return *this;
-    }
-};
-
-template <typename T>
-T rotate(const T& point, float a, float b, float c) {
-    T rotated;
+template <typename Point>
+Point rotate(const Point& point, float a, float b, float c) {
+    Point rotated;
     float x = point.x;
     float y = point.y;
     float z = point.z;
@@ -189,13 +31,6 @@ T rotate(const T& point, float a, float b, float c) {
     float sinC = sin(c);
     float cosC = cos(c);
 
-    /*
-        this->x = x*cosB*cosC - y*sinC*cosB + z*sinB;
-        this->y = x*(sinA*sinB*cosC+sinC*cosA) - y*(sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB;
-        this->z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB;
-        */
-
-
     rotated.x = x*cosB*cosC - y*sinC*cosB + z*sinB;
     rotated.y = x*(sinA*sinB*cosC+sinC*cosA) + y*(-sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB;
     rotated.z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB;
@@ -203,70 +38,29 @@ T rotate(const T& point, float a, float b, float c) {
     return rotated;
 }
 
-
-struct rpoint_t {
-    float a_horizontal;
-    float a_vertical;
-    float depth;
-    point_t to_3d() {
-        point_t point;
-        point.x = depth * std::sin(a_horizontal);
-        point.y = depth * std::cos(a_horizontal) * std::sin(a_vertical);
-        point.z = depth;// * std::cos(a_horizontal) * std::cos(a_vertical);
-        return point;
-    }
-    QString toString() {
-        return QString::number(a_horizontal) + ',' + QString::number(a_vertical) + ',' + QString::number(depth);
-    }
-};
+template <typename Point>
+Point rotate(const Point& point, float a, float b, float c, const Point& around) {
+    Point rotated = point;
+    rotated.x -= around.x;
+    rotated.y -= around.y;
+    rotated.z -= around.z;
+    rotated = rotate(rotated, a, b, c);
+    rotated.x += around.x;
+    rotated.y += around.y;
+    rotated.z += around.z;
+    return rotated;
+}
 
 
 template<typename Point>
 QString point_toString(Point p) {
-    return QString::number(p.x) + ',' + QString::number(p.y) + ',' + QString::number(p.z);
+    return QString::number(p.x,'f',4) + ", " + QString::number(p.y,'f',4) + ", " + QString::number(p.z,'f',4);
 }
 
 
-struct scaline_normalizer {
-    static bool detect(float* points, size_t width, size_t height, size_t cutoff, size_t& x1, size_t& y1, size_t& x2, size_t& y2, size_t& x3, size_t& y3) {
-
-        float maxR = 0;//std::numeric_limits<float>::infinity();
-        float maxL = 0;//std::numeric_limits<float>::infinity();
-        float minR = std::numeric_limits<float>::infinity();
-        float minL = std::numeric_limits<float>::infinity();
-        size_t maxRX = width - 1;
-        size_t maxLX = width - 1;
-        size_t yR = 0;
-        size_t yL = height - 1;
-        for (size_t x = cutoff; x < width; x++) {
-            size_t iR = x + yR * width;
-            size_t iL = x + yL * width;
-            if (points[iR] > maxR) {
-                maxR = points[iR];
-            }
-            if (points[iL] > maxL) {
-                maxL = points[iL];
-            }
-            if (points[iR] != 0 && points[iR] > maxR) {
-                maxR = points[iR];
-            }
-            if (points[iL] > maxL) {
-                maxL = points[iL];
-            }
-        }
-
-        if (maxL > maxR) {
-
-        }
-
-
-        return true;
-    }
-};
-
-
 template <typename Uint>
-Uint to_color(float val, float min, float max) {
+Uint to_grayscale(float val, float min, float max) {
+    if (val == 0) return 0;
     static const Uint max_color = std::numeric_limits<Uint>::max();
     float dv = max - min;
     if (val < min) return max_color;
@@ -274,15 +68,24 @@ Uint to_color(float val, float min, float max) {
     return max_color - (val - min) / dv * max_color;
 }
 
-struct rgb_pixel_t {
-    uint8_t r = 0, g = 0, b = 0;
+struct __attribute__ ((packed)) rgb_t {
+    uint8_t r = 0, b = 0, g = 0;
 
-    template<typename Number>
-    rgb_pixel_t& operator=(Number num) {
-        r = g = b = num / (float)std::numeric_limits<Number>::max() * 255;
+    rgb_t& operator=(uint8_t num) {
+        r = g = b = num;
         return *this;
     }
-    operator const uint8_t() const { return r; }
+    template<typename UNumber>
+    rgb_t& operator=(UNumber num) {
+        r = g = b = num / (float)std::numeric_limits<UNumber>::max() * 255;
+        return *this;
+    }
+    operator const uint8_t() const {
+        return (r + g + b) / 3;
+    }
+    operator const QString() const {
+        return QString::number(r) + ',' + QString::number(g) + ',' + QString::number(b);
+    }
 };
 
 template <typename Pixel, typename Color>
@@ -319,505 +122,198 @@ template <typename Float>
 float angle_between(Float ax, Float ay, Float bx, Float by) {
     float deltaY = abs(by - ay);
     float deltaX = abs(bx - ax);
-    return atan2(deltaY, deltaX);
+    return atan2(ay-by, ax-bx);
 }
 
-/*
-struct rgb_points_t {
-    std::vector<rs2::vertex> vertexes;
-    std::vector<rgb_points_t> colors;
+template <typename Point>
+Point angle(const Point& from, const Point& to) {
+    Point vector;
+    vector.x = to.x - from.x;
+    vector.y = to.y - from.y;
+    vector.z = to.z - from.z;
+
+    float angle_to_x = std::atan2(vector.y,vector.x);
+    float angle_to_z = std::atan2(std::sqrt(vector.x * vector.x + vector.y * vector.y), vector.z);
+
+    Point rotation;
+    rotation.x = angle_to_x;
+    rotation.y = 0;
+    rotation.z = angle_to_z;
+
+    qDebug() << point_toString(vector) << point_toString(rotation);
+
+    return rotation;
+}
+
+template<typename Point = rs2::vertex>
+void pixel_to_point(Point& point, const rs2_intrinsics* intrin, size_t pixel_x, size_t pixel_y, float depth) {
+    assert(intrin->model != RS2_DISTORTION_MODIFIED_BROWN_CONRADY); // Cannot deproject from a forward-distorted image
+    assert(intrin->model != RS2_DISTORTION_FTHETA); // Cannot deproject to an ftheta image
+    //assert(intrin->model != RS2_DISTORTION_BROWN_CONRADY); // Cannot deproject to an brown conrady model
+    float x = (pixel_x - intrin->ppx) / intrin->fx;
+    float y = (pixel_y - intrin->ppy) / intrin->fy;
+    if(intrin->model == RS2_DISTORTION_INVERSE_BROWN_CONRADY) {
+        float r2  = x*x + y*y;
+        float f = 1 + intrin->coeffs[0]*r2 + intrin->coeffs[1]*r2*r2 + intrin->coeffs[4]*r2*r2*r2;
+        float ux = x*f + 2*intrin->coeffs[2]*x*y + intrin->coeffs[3]*(r2 + 2*x*x);
+        float uy = y*f + 2*intrin->coeffs[3]*x*y + intrin->coeffs[2]*(r2 + 2*y*y);
+        x = ux;
+        y = uy;
+    }
+    point.x = depth * x;
+    point.y = depth * y;
+    point.z = depth;
+}
+
+template<typename Point = rs2::vertex, typename Color = rgb_t>
+struct shape_t {
+    Point* points;
+    Color* colors;
+    Color line_color{std::numeric_limits<uint8_t>::max()};
+    std::vector<Point> lines;
     size_t width;
     size_t height;
-    rgb_points_t(size_t width, size_t height) {
-        this->width = width;
-        this->height = height;
-        vertexes.resize(width * height);
-        colors.resize(width * height);
+    size_t size;
+
+    shape_t(size_t _width, size_t _height, Point* _points = nullptr):
+        width(_width), height(_height)
+    {
+        size = width * height;
+        points = new Point[size];
+        colors = new Color[size];
+        memset(points, 0, size * sizeof(Point));
+        memset(colors, 0, size * sizeof(Color));
+        if (_points)
+            memcpy(points, _points, size * sizeof(Point));
     }
 
-    void push(rs2::vertex vertex, rgb_points_t color) {
-        vertexes.push_back(vertex);
-        colors.push_back(color);
+    shape_t(size_t _width, size_t _height, uint16_t* depths, const rs2_intrinsics& intr, float depth_units):
+        shape_t(_width, _height, nullptr)
+    {
+        for (size_t y = 0; y < height; y++) {
+            for (size_t x = 0; x < width; x++) {
+                auto i = y * width + x;
+                pixel_to_point(points[i], &intr, x, y, depths[i] * depth_units);
+            }
+        }
     }
 
-    void render(rgb_points_t* canvas, size_t c_width, size_t c_height) {
+    shape_t(shape_t& other): shape_t(other.width, other.height, other.points) {}
 
+    ~shape_t() {
+        delete[] points;
+        delete[] colors;
+    }
+
+    shape_t& rotate(float a, float b, float c) {
+        float sinA = sin(a);
+        float cosA = cos(a);
+        float sinB = sin(b);
+        float cosB = cos(b);
+        float sinC = sin(c);
+        float cosC = cos(c);
+        for (size_t i = 0; i < size; i++) {
+            float x = points[i].x;
+            float y = points[i].y;
+            float z = points[i].z;
+            points[i].x = x*cosB*cosC - y*sinC*cosB + z*sinB;
+            points[i].y = x*(sinA*sinB*cosC+sinC*cosA) + y*(-sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB;
+            points[i].z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB;
+        }
+        return *this;
+    }
+
+    shape_t& rotate(float a, float b, float c, const Point& around) {
+        float sinA = sin(a);
+        float cosA = cos(a);
+        float sinB = sin(b);
+        float cosB = cos(b);
+        float sinC = sin(c);
+        float cosC = cos(c);
+        for (size_t i = 0; i < size; i++) {
+            float x = points[i].x -= around.x;
+            float y = points[i].y -= around.y;
+            float z = points[i].z -= around.z;
+            points[i].x = x*cosB*cosC - y*sinC*cosB + z*sinB + around.x;
+            points[i].y = x*(sinA*sinB*cosC+sinC*cosA) + y*(-sinA*sinB*sinC+cosA*cosC) - z*sinA*cosB + around.y;
+            points[i].z = x*(sinA*sinC-sinB*cosA*cosC) + y*(sinA*cosC+sinB*sinC*cosA) + z*cosA*cosB + around.z;
+        }
+        return *this;
+    }
+
+    shape_t&  colorize(float z_min, float z_max) {
+        for (size_t i = 0; i < size; i++)
+            colors[i] = to_grayscale<uint8_t>(points[i].z, z_min, z_max);
+        return *this;
+    }
+
+    template<typename Pixel = rgb_t>
+    uint8_t* render(int scale = 1) const {
+        Pixel* pixels = (Pixel*)new uint8_t[size * sizeof(Pixel)];
+        memset(pixels, 0, size * sizeof(Pixel));
+        for (size_t i = 0; i < size; i++) {
+            auto& point = points[i];
+            size_t x = point.x * scale * width/2 + width/2;
+            if (x < 0 || x >= width) continue;
+            size_t y = point.y * scale * width/2 + height/2;
+            if (y < 0 || y >= height) continue;
+            Pixel& pixel = pixels[y * width + x];
+            if (colors[i]) pixel = colors[i];
+        }
+        for (auto& vertex1 : lines) {
+            for (auto& vertex2 : lines) {
+                if (&vertex1 == &vertex2) continue;
+                size_t x1 = vertex1.x * scale * width/2 + width/2;
+                size_t y1 = vertex1.y * scale * width/2 + height/2;
+                size_t x2 = vertex2.x * scale * width/2 + width/2;
+                size_t y2 = vertex2.y * scale * width/2 + height/2;
+                draw_line(pixels, width, height, line_color, x1, y1, x2, y2);
+            }
+        }
+        return (uint8_t*)pixels;
+    }
+
+    Point center_mass(float z_min = std::numeric_limits<float>::min(), float z_max = std::numeric_limits<float>::max()) {
+        Point center_mass{0,0,0};
+        size_t center_mass_cnt = 0;
+        for (size_t fy = 0; fy < height; fy++) {
+            for (size_t fx = 0; fx < width; fx++) {
+                auto i = fy * width + fx;
+                if (points[i].z == 0 || points[i].z < z_min || points[i].z > z_max) continue;
+                center_mass.z += points[i].z;
+                center_mass_cnt++;
+            }
+        }
+        center_mass.z /= center_mass_cnt;
+        return center_mass;
+    }
+
+    Point center_mass(size_t x_min, size_t x_max, size_t y_min, size_t y_max, float z_min = std::numeric_limits<float>::min(), float z_max = std::numeric_limits<float>::max()) {
+        Point center_mass{0,0,0};
+        size_t center_mass_cnt = 0;
+        for (size_t fy = y_min; fy < y_max && fy < height; fy++) {
+            for (size_t fx = x_min; fx < x_max && fx < width; fx++) {
+                auto i = fy * width + fx;
+                if (points[i].z == 0 || points[i].z < z_min || points[i].z > z_max) continue;
+                center_mass.x += points[i].x;
+                center_mass.y += points[i].y;
+                center_mass.z += points[i].z;
+                center_mass_cnt++;
+            }
+        }
+        center_mass.x /= center_mass_cnt;
+        center_mass.y /= center_mass_cnt;
+        center_mass.z /= center_mass_cnt;
+        return center_mass;
     }
 };
-*/
 
 
 class WorkerThread : public QThread
 {
     Q_OBJECT
 
-    std::mutex wait_for_frames_mutex;
 
-    void run() override {
-        rs2::config rs_config;
-
-
-
-        if (false) {
-            rs_config.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30); // 1920, 1080
-            rs_config.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);   // 1024, 768
-            //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
-            //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
-        } else {
-            //rs_config.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, 30);
-            rs_config.enable_stream(RS2_STREAM_DEPTH, 1024, 768, RS2_FORMAT_Z16, 30);
-            //rs_config.enable_device_from_file("/home/v/flyover.bag");
-            //rs_config.enable_device_from_file("/home/v/Documents/20240229_082253.bag");
-            rs_config.enable_device_from_file("/home/v/Downloads/test4.bag");
-        }
-
-        rs2::pipeline rs_pipeline;
-        rotation_estimator_t rotation_estimator;
-        rs2::pipeline_profile rs_profile;
-
-        rs_profile = rs_pipeline.start(rs_config);
-        qDebug() << "started!";
-
-
-        constexpr size_t dimensionX = 500;
-        constexpr size_t dimensionY = 500;
-        uint16_t* pixels = new uint16_t[dimensionX * dimensionY];
-
-        uint64_t last_fno = 0;
-
-        float sliceEpsilon = 0.1;
-
-        float guaranteed_floor = 0.9;
-
-        while (true) {
-            if (paused) continue;
-
-            std::unique_lock<std::mutex> lock(wait_for_frames_mutex);
-            rs2::frameset frameset = rs_pipeline.wait_for_frames();
-
-            auto fno = frameset.get_frame_number();
-            if (fno < last_fno) {
-                // reset;
-                rotation_estimator.firstAccel = true;
-                rotation_estimator.firstGyro = true;
-            }
-            last_fno = fno;
-
-            for (const rs2::frame& frame: frameset) {
-                auto stream_type = frame.get_profile().stream_type();
-                auto format = frame.get_profile().format();
-
-                if (stream_type == RS2_STREAM_DEPTH) {
-                    auto depth = frame.as<rs2::depth_frame>();
-                    auto sensor = rs2::sensor_from_frame(depth);
-                    auto depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
-                    auto frame_width = depth.get_width();
-                    auto frame_height = depth.get_height();
-                    auto frame_points_count = frame_width * frame_height;
-                    auto depth_data = (uint16_t*)depth.get_data();
-
-                    auto depth_data2 = new uint16_t[frame_points_count];
-
-                    uint16_t maxDepth = 0;
-                    for (size_t i = 0; i < frame_points_count; i++) {
-                        if (depth_data[i] > maxDepth)
-                            maxDepth = depth_data[i];
-                    }
-                    float scale_up = 2;//maxDepth * depth_units;
-
-                    for (size_t y = 0; y < frame_height; y++) {
-                        for (size_t x = 0; x < frame_width; x++) {
-                            auto i = y * frame_width + x;
-                            if (depth_data[i])
-                                depth_data2[i] = to_color<uint16_t>(depth_data[i] * depth_units, 0.5, 9);//65535 - depth_data[i] * depth_units / scale_up * 65535;
-                            else
-                                depth_data2[i] = 0;
-
-                            if (y % 50 == 0)
-                                depth_data2[i] = 0;
-                            if (x % 100 == 0)
-                                depth_data2[i] = 0;
-                        }
-                    }
-
-                    emit resultReady("label1", depth_data2, frame_width, frame_height, true);
-
-
-
-                    // ==================================== color ====================
-
-                    rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
-                    memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
-
-                    std::vector<rs2::vertex> extra_points;
-                    rs2::pointcloud pointcloud;
-                    rs2::points rspoints = pointcloud.calculate(depth);
-                    auto vertices = rspoints.get_vertices();
-                    for (size_t i = 0; i < rspoints.size(); i++) {
-                        if (vertices[i].z == 0) continue;
-                        auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180);
-                        size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                        size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                        uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 9);
-                        if (y < 0 || y >= dimensionY) continue;
-                        if (x < 0 || x >= dimensionX) continue;
-                        pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
-                    }
-
-                    /*
-                    for (size_t fy = 0; fy < frame_height; fy++) {
-                        for (size_t fx = frame_width * 0.75; fx < frame_width; fx++) {
-                            auto i = fy * frame_width + fx;
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180);
-
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 2);
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = (uint8_t)(pixels[y * dimensionX + x] * 0.5);
-                        }
-                    }
-                    */
-
-
-
-                    rs2::vertex avg_bot_right{0,0,0};
-                    size_t avg_bot_right_cnt = 0;
-                    for (size_t fy = 0; fy < frame_height / 2; fy++) {
-                        for (size_t fx = frame_width*(guaranteed_floor + (1-guaranteed_floor)/2); fx < frame_width; fx++) {
-                            auto i = fy * frame_width + fx;
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180);
-
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 2);
-
-                            avg_bot_right.x += vertex.x;
-                            avg_bot_right.y += vertex.y;
-                            avg_bot_right.z += vertex.z;
-                            avg_bot_right_cnt++;
-
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = 0;
-                            pixels[y * dimensionX + x].r = 128;
-                        }
-                    }
-                    avg_bot_right.x /= avg_bot_right_cnt;
-                    avg_bot_right.y /= avg_bot_right_cnt;
-                    avg_bot_right.z /= avg_bot_right_cnt;
-
-
-
-                    rs2::vertex avg_bot_left{0,0,0};
-                    size_t avg_bot_left_cnt = 0;
-                    for (size_t fy = frame_height - 1; fy > frame_height / 2; fy--) {
-                        for (size_t fx = frame_width*(guaranteed_floor + (1-guaranteed_floor)/2); fx < frame_width; fx++) {
-                            auto i = fy * frame_width + fx;
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180);
-
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 2);
-
-                            avg_bot_left.x += vertex.x;
-                            avg_bot_left.y += vertex.y;
-                            avg_bot_left.z += vertex.z;
-                            avg_bot_left_cnt++;
-
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = 0;
-                            pixels[y * dimensionX + x].g = 128;
-                        }
-                    }
-                    avg_bot_left.x /= avg_bot_left_cnt;
-                    avg_bot_left.y /= avg_bot_left_cnt;
-                    avg_bot_left.z /= avg_bot_left_cnt;
-
-
-
-                    rs2::vertex avg_top_center{0,0,0};
-                    size_t avg_top_center_cnt = 0;
-                    for (size_t fy = 0; fy < frame_height; fy++) {
-                        for (size_t fx = frame_width * guaranteed_floor; fx < frame_width * (guaranteed_floor + (1-guaranteed_floor)/2); fx++) {
-                            auto i = fy * frame_width + fx;
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180);
-
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 2);
-
-                            avg_top_center.x += vertex.x;
-                            avg_top_center.y += vertex.y;
-                            avg_top_center.z += vertex.z;
-                            avg_top_center_cnt++;
-
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = 0;
-                            pixels[y * dimensionX + x].b = 128;
-                        }
-                    }
-                    avg_top_center.x /= avg_top_center_cnt;
-                    avg_top_center.y /= avg_top_center_cnt;
-                    avg_top_center.z /= avg_top_center_cnt;
-
-                    rs2::vertex avg_bot_center;
-                    avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
-                    avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
-                    avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
-
-                    extra_points.push_back(avg_top_center);
-                    extra_points.push_back(avg_bot_left);
-                    extra_points.push_back(avg_bot_right);
-                    extra_points.push_back(avg_bot_center);
-                    for (auto& vertex : extra_points) {
-                        size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                        size_t y = vertex.y * zoomScale * dimensionY/2 + dimensionY/2;
-                        if (y < 0 || y >= dimensionY) continue;
-                        if (x < 0 || x >= dimensionX) continue;
-                        pixels[y * dimensionX + x] = std::numeric_limits<uint8_t>::max();
-                    }
-
-                    for (auto& vertex1 : extra_points) {
-                        for (auto& vertex2 : extra_points) {
-                            if (&vertex1 == &vertex2) continue;
-                            size_t x1 = vertex1.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y1 = vertex1.y * zoomScale * dimensionY/2 + dimensionY/2;
-                            size_t x2 = vertex2.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y2 = vertex2.y * zoomScale * dimensionY/2 + dimensionY/2;
-                            draw_line(pixels, dimensionX, dimensionY, std::numeric_limits<uint8_t>::max(), x1, y1, x2, y2);
-                        }
-                    }
-
-                    emit resultReady("rgb", pixels, dimensionX, dimensionY, true);
-
-                    float rotation2 = angle_between(avg_top_center.z, avg_top_center.y, avg_bot_center.z, avg_bot_center.y);
-                    auto avg_bot_right_2 = rotate(avg_bot_right, -rotation2, 0,0);
-                    auto avg_bot_left_2 = rotate(avg_bot_left, -rotation2, 0,0);
-                    float rotation1 = angle_between(avg_bot_right_2.x, avg_bot_right_2.y, avg_bot_left_2.x, avg_bot_left_2.y);
-
-                    auto floor_level = rotate(avg_bot_center,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1);
-
-                    if (true) {
-                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
-                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
-                        std::vector<rs2::vertex> extra_points;
-                        rs2::pointcloud pointcloud;
-                        rs2::points rspoints = pointcloud.calculate(depth);
-                        auto vertices = rspoints.get_vertices();
-                        for (size_t i = 0; i < rspoints.size(); i++) {
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA - rotation2,rotateB,rotateC+90*PI/180 - rotation1);
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 9);
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
-                        }
-                        emit resultReady("rgb2", pixels, dimensionX, dimensionY, true);
-                    }
-
-                    float avgCenterX1 = 0, avgCenterY1 = 0, countCenter1 = 0;
-                    float avgCenterX2 = 0, avgCenterY2 = 0, countCenter2 = 0;
-
-                    if (true) {
-                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
-                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
-                        std::vector<rs2::vertex> extra_points;
-                        rs2::pointcloud pointcloud;
-                        rs2::points rspoints = pointcloud.calculate(depth);
-                        auto vertices = rspoints.get_vertices();
-                        for (size_t i = 0; i < rspoints.size(); i++) {
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA - rotation2-90*PI/180,rotateB,rotateC+90*PI/180 - rotation1);
-                            //if (i % 100 == 0) qDebug() << point_toString(vertex);
-                            if (vertex.z < floor_level.z + sliceLevel + boxHeight - sliceEpsilon || vertex.z > floor_level.z + sliceLevel + boxHeight + sliceEpsilon) continue;
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2*0;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 9);
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
-                        }
-
-
-
-                        for (size_t x = 0; x < dimensionX; x++) {
-                            for (size_t y = 0; y < dimensionY; y++) {
-
-                            }
-                        }
-
-                        /*
-                        rgb_pixel_t green{0,255,0};
-                        float prevCenterX = -1;
-                        float prevCenterX_Y = -1;
-                        size_t minCenterX = 0, minCenterY = 0;
-                        size_t maxCenterX = 0, maxCenterY = 0;
-                        for (size_t y = 0; y < dimensionY; y++) {
-                            float centerX = 0;
-                            size_t countX = 0;
-                            for (size_t x = 0; x < dimensionX; x++) {
-                                size_t i = y * dimensionX + x;
-                                if (pixels[i]) {
-                                    centerX += x;
-                                    countX++;
-                                }
-                            }
-                            if (countX > 10) {
-                                centerX /= countX;
-                                if (centerX < 0 || centerX > dimensionX) continue;
-                                pixels[y * dimensionX + (size_t)centerX].g = 255;
-                                if (prevCenterX != -1) {
-                                    draw_line(pixels,dimensionX, dimensionY,green,prevCenterX, prevCenterX_Y,centerX,y);
-                                }
-
-                                if (minCenterY == 0) {
-                                    minCenterY = y;
-                                    minCenterX = centerX;
-                                }
-                                if (y > maxCenterY) {
-                                    maxCenterY = y;
-                                    maxCenterX = centerX;
-                                }
-                                prevCenterX = centerX;
-                                prevCenterX_Y = y;
-                            }
-                        }
-                        size_t dCenterY = maxCenterY - minCenterY;
-                        for (size_t y = minCenterY; y < minCenterY + dCenterY / 2; y++) {
-                            for (size_t x = 0; x < dimensionX; x++) {
-                                size_t i = y * dimensionX + x;
-                                if (pixels[i]) {
-                                    pixels[i] = 0;
-                                    pixels[i].r = 255;
-
-                                    avgCenterX1 += x;
-                                    avgCenterY1 += y;
-                                    countCenter1++;
-                                }
-                            }
-                        }
-                        avgCenterX1 /= countCenter1;
-                        avgCenterY1 /= countCenter1;
-                        for (size_t y = minCenterY + dCenterY / 2; y < maxCenterY; y++) {
-                            for (size_t x = 0; x < dimensionX; x++) {
-                                size_t i = y * dimensionX + x;
-                                if (pixels[i]) {
-                                    pixels[i] = 0;
-                                    pixels[i].b = 255;
-
-                                    avgCenterX2 += x;
-                                    avgCenterY2 += y;
-                                    countCenter2++;
-                                }
-                            }
-                        }
-                        avgCenterX2 /= countCenter2;
-                        avgCenterY2 /= countCenter2;
-
-
-                        draw_line(pixels,dimensionX, dimensionY,(uint8_t)255,avgCenterX1, avgCenterY1,avgCenterX2,avgCenterY2);
-                        */
-
-                        emit resultReady("rgb3", pixels, dimensionX, dimensionY, true);
-                    }
-
-                    float rotation3 = angle_between(avgCenterY1, avgCenterX1, avgCenterY2, avgCenterX2);
-                    //emit statusBarResult(QString::number(rotation3));
-
-                    if (true) {
-                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
-                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
-                        std::vector<rs2::vertex> extra_points;
-                        rs2::pointcloud pointcloud;
-                        rs2::points rspoints = pointcloud.calculate(depth);
-                        auto vertices = rspoints.get_vertices();
-                        //qDebug() << point_toString(avg_bot_center) << "   |   " << point_toString(floor_level);
-                        for (size_t i = 0; i < rspoints.size(); i++) {
-                            if (vertices[i].z == 0) continue;
-                            auto vertex = rotate(vertices[i],rotateA - rotation2-90*PI/180,rotateB,rotateC+90*PI/180 - rotation1);
-                            //if (i % 100 == 0) qDebug() << point_toString(vertex);
-                            //if (vertex.z < sliceLevel - 0.1 || vertex.z > sliceLevel + 0.1) continue;
-                            if (vertex.z < floor_level.z + sliceLevel - sliceEpsilon || vertex.z > floor_level.z + sliceLevel + sliceEpsilon) continue;
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2*0;
-                            uint8_t color = to_color<uint8_t>(vertices[i].z, 0.5, 9);
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
-                        }
-
-                        extra_points.push_back(rotate(avg_top_center,rotateA - rotation2-90*PI/180,rotateB,rotateC- rotation1));
-                        extra_points.push_back(rotate(avg_bot_left,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1));
-                        extra_points.push_back(rotate(avg_bot_right,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1));
-                        extra_points.push_back(rotate(avg_bot_center,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1));
-                        for (auto& vertex : extra_points) {
-                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
-                            size_t y = vertex.y * zoomScale * dimensionY/2 + dimensionY/2*0;
-                            if (y < 0 || y >= dimensionY) continue;
-                            if (x < 0 || x >= dimensionX) continue;
-                            pixels[y * dimensionX + x] = std::numeric_limits<uint8_t>::max();
-                        }
-
-                        rgb_pixel_t blue{0,0,255};
-
-                        for (auto& vertex1 : extra_points) {
-                            for (auto& vertex2 : extra_points) {
-                                if (&vertex1 == &vertex2) continue;
-                                size_t x1 = vertex1.x * zoomScale * dimensionX/2 + dimensionX/2;
-                                size_t y1 = vertex1.y * zoomScale * dimensionY/2 + dimensionY/2*0;
-                                size_t x2 = vertex2.x * zoomScale * dimensionX/2 + dimensionX/2;
-                                size_t y2 = vertex2.y * zoomScale * dimensionY/2 + dimensionY/2*0;
-                                draw_line(pixels, dimensionX, dimensionY, blue, x1, y1, x2, y2);
-                            }
-                        }
-
-
-                        emit resultReady("rgb4", pixels, dimensionX, dimensionY, true);
-                    }
-
-                }
-                else if (stream_type == RS2_STREAM_GYRO && format == RS2_FORMAT_MOTION_XYZ32F) {
-                    auto motion = frame.as<rs2::motion_frame>();
-                    double ts = motion.get_timestamp();
-                    rs2_vector gyro_data = motion.get_motion_data();
-                    rotation_estimator.process_gyro(gyro_data, ts);
-                }
-                else if (stream_type == RS2_STREAM_ACCEL && format == RS2_FORMAT_MOTION_XYZ32F) {
-                    auto motion = frame.as<rs2::motion_frame>();
-                    rs2_vector accel_data = motion.get_motion_data();
-                    rotation_estimator.process_accel(accel_data);
-                } else if (stream_type == RS2_STREAM_COLOR) {
-                    auto color = frame.as<rs2::video_frame>();
-                    auto frame_width = color.get_width();
-                    auto frame_height = color.get_height();
-                    auto frame_points_count = frame_width * frame_height;
-                    auto color_data = (uint8_t*)color.get_data();
-                    auto color_copy = new uint8_t[frame_points_count * 3];
-                    memcpy(color_copy, color_data, frame_points_count * 3);
-                    emit resultReady("label3", color_copy, frame_width, frame_height, true);
-                }
-            }
-
-            auto theta = rotation_estimator.get_theta();
-            float xrot_rad = theta.y - 180*PI/180;
-            float xrot_deg = xrot_rad * 180/PI;
-            emit statusBarResult(theta.toString() + " xrot = " + QString::number(xrot_deg));
-
-        }
-
-        delete[] pixels;
-
-    }
 public:
     WorkerThread(QObject* parent = nullptr):  QThread(parent) {}
     bool paused = false;
@@ -827,13 +323,229 @@ public:
     float zoomScale = 300;
     float sliceLevel = 0;
     float boxHeight = 0.4;
+
+    float sliceEpsilon = 0.1;
+    float guaranteed_floor = 0.9;
 signals:
-    void resultReady1(uint16_t* data, size_t width, size_t height, bool cleanup = false);
-    void resultReady2(uint16_t* data, size_t width, size_t height, bool cleanup = false);
-    void resultReady3(uint8_t* data, size_t width, size_t height, bool cleanup = false);
-    void resultReady(QString, void* data, size_t width, size_t height, bool cleanup = false);
-    void statusBarResult(QString);
+    void drawDepth(uint16_t* data, size_t width, size_t height, int rotate = 0);
+    void drawColor(uint8_t* data, size_t width, size_t height, int rotate = 0);
+    void drawRgb(QString, uint8_t* data, size_t width, size_t height, int rotate = 0);
+    void statusMessage(QString);
     void debugText(QString);
+
+private:
+    std::mutex wait_for_frames_mutex;
+
+    void renderRgb(QString name, const shape_t<>& shape, int rotate = 0) {
+        emit drawRgb(name, shape.render(), shape.width, shape.height, rotate);
+    }
+
+    void run() override {
+        rs2::config rs_config;
+
+        if (true) {
+            //rs_config.enable_stream(RS2_STREAM_COLOR, 320, 240, RS2_FORMAT_RGB8, 30); // 1920, 1080
+            rs_config.enable_stream(RS2_STREAM_DEPTH, 320, 240, RS2_FORMAT_Z16, 30);   // 1024, 768
+            //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
+            //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
+        } else {
+            //rs_config.enable_device_from_file("/home/v/flyover.bag");
+            //rs_config.enable_device_from_file("/home/v/boxes.bag");
+            //rs_config.enable_device_from_file("/home/v/Documents/20240229_082253.bag");
+            //rs_config.enable_device_from_file("/home/v/Downloads/test4.bag");
+        }
+
+        rs2::pipeline rs_pipeline;
+        rs2::pipeline_profile rs_profile = rs_pipeline.start(rs_config);
+
+        qDebug() << "started!";
+
+        while (true) {
+            if (paused) continue;
+
+            std::unique_lock<std::mutex> lock(wait_for_frames_mutex);
+            rs2::frameset frameset = rs_pipeline.wait_for_frames();
+
+            for (const rs2::frame& frame: frameset) {
+                auto stream_type = frame.get_profile().stream_type();
+                auto format = frame.get_profile().format();
+
+                if (stream_type == RS2_STREAM_DEPTH) {
+                    auto depth = frame.as<rs2::depth_frame>();
+                    auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+                    auto sensor = rs2::sensor_from_frame(depth);
+                    auto depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
+                    auto frame_width = depth.get_width();
+                    auto frame_height = depth.get_height();
+                    auto frame_size = frame_width * frame_height;
+                    auto depth_data = (uint16_t*)depth.get_data();
+                    float depth_min = 0.5;
+                    float depth_max = 5;
+
+
+
+                    float rotation1 = 0;
+                    float rotation2 = 0;
+                    float rot1 = 0;
+                    float rot2 = 0;
+
+                    auto depth_copy = new uint16_t[frame_size];
+                    memcpy(depth_copy, depth_data, frame_size * sizeof(uint16_t));
+                    for (size_t i = 0; i < frame_size; i++)
+                        depth_copy[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, depth_min, depth_max);
+                    emit drawDepth(depth_copy, frame_width, frame_height, 90);
+
+                    shape_t shape_original(frame_width, frame_height, depth_data, intr, depth_units);
+                    shape_original.colorize(depth_min, depth_max);
+
+                    auto center_mass = shape_original.center_mass(depth_min, depth_max);
+                    {
+                    auto avg_bot_right = shape_original.center_mass(
+                        frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+                        frame_width,
+                        0,
+                        frame_height / 2,
+                        depth_min,
+                        depth_max
+                    );
+
+                    auto avg_bot_left = shape_original.center_mass(
+                        frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+                        frame_width,
+                        frame_height / 2,
+                        frame_height,
+                        depth_min,
+                        depth_max
+                        );
+
+                    auto avg_top_center = shape_original.center_mass(
+                        frame_width * guaranteed_floor,
+                        frame_width * (guaranteed_floor + (1 - guaranteed_floor) / 2),
+                        0,
+                        frame_height,
+                        depth_min,
+                        depth_max
+                    );
+
+
+                    rs2::vertex avg_bot_center;
+                    avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
+                    avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
+                    avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
+
+                    shape_original.lines.push_back(avg_bot_right);
+                    shape_original.lines.push_back(avg_bot_left);
+                    shape_original.lines.push_back(avg_top_center);
+                    shape_original.lines.push_back(avg_bot_center);
+                    shape_original.line_color = rgb_t{255,0,0};
+
+                    renderRgb("shape_original", shape_original);
+
+
+
+
+                    rot1 = angle_between(avg_top_center.z, avg_top_center.x, avg_bot_center.z, avg_bot_center.x);
+                    auto avg_bot_right_2 = rotate(avg_bot_right, 0, -rot1, 0,center_mass);
+                    auto avg_bot_left_2 = rotate(avg_bot_left, 0, -rot1, 0,center_mass);
+                    rot2 = PI - angle_between(avg_bot_right_2.y, avg_bot_right_2.x, avg_bot_left_2.y, avg_bot_left_2.x);
+
+
+
+                    shape_t shape_floored2(shape_original);
+                    shape_floored2.rotate(0,-rot1,-rot2,center_mass).rotate(0,0,0,center_mass).rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
+                    renderRgb("shape_floored22", shape_floored2);
+
+                    }
+
+                    shape_t shape_rotated(shape_original);
+                    shape_rotated.rotate(0, 0, PI/2, center_mass).colorize(depth_min, depth_max);
+
+                    {
+                        auto avg_bot_right = shape_rotated.center_mass(
+                            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+                            frame_width,
+                            0,
+                            frame_height / 2,
+                            depth_min,
+                            depth_max
+                            );
+
+                        auto avg_bot_left = shape_rotated.center_mass(
+                            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+                            frame_width,
+                            frame_height / 2,
+                            frame_height,
+                            depth_min,
+                            depth_max
+                            );
+
+                        auto avg_top_center = shape_rotated.center_mass(
+                            frame_width * guaranteed_floor,
+                            frame_width * (guaranteed_floor + (1 - guaranteed_floor) / 2),
+                            0,
+                            frame_height,
+                            depth_min,
+                            depth_max
+                            );
+
+
+                        rs2::vertex avg_bot_center;
+                        avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
+                        avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
+                        avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
+
+                        shape_rotated.lines.push_back(avg_bot_right);
+                        shape_rotated.lines.push_back(avg_bot_left);
+                        shape_rotated.lines.push_back(avg_top_center);
+                        shape_rotated.lines.push_back(avg_bot_center);
+                        shape_rotated.line_color = rgb_t{255,0,0};
+
+                        renderRgb("shape_rotated", shape_rotated);
+
+                        rotation1 = angle_between(avg_top_center.z, avg_top_center.y, avg_bot_center.z, avg_bot_center.y);
+                        auto avg_bot_right_2 = rotate(avg_bot_right, rotation1, 0,0,center_mass);
+                        auto avg_bot_left_2 = rotate(avg_bot_left, rotation1, 0,0,center_mass);
+                        rotation2 = angle_between(avg_bot_right_2.x, avg_bot_right_2.y, avg_bot_left_2.x, avg_bot_left_2.y);
+
+
+                        shape_t shape_rotated2(shape_original);
+                        shape_rotated2.rotate(rotation1, 0, 90*PI/180-rotation2, center_mass).colorize(depth_min, depth_max);
+                        renderRgb("shape_rotated2", shape_rotated2);
+
+                        shape_t shape_floored2(shape_original);
+                        shape_floored2.rotate(0,-rotation1,-rotation2,center_mass).rotate(0,0,0,center_mass).rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
+                        renderRgb("shape_floored2", shape_floored2);
+                    }
+
+
+
+                    shape_t shape_floored(shape_original);
+                    shape_floored.rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
+                    renderRgb("shape_floored", shape_floored);
+
+                    rs2::vertex an{rotateA,rotateB,rotateC};
+                    rs2::vertex an2{rotation1,rotation2,0};
+                    rs2::vertex an3{rot1,rot2,0};
+
+                    statusMessage(point_toString(an) + " : " + point_toString(an2) + " : " + point_toString(an3));
+
+
+                } else if (stream_type == RS2_STREAM_COLOR) {
+                    auto color = frame.as<rs2::video_frame>();
+                    auto frame_width = color.get_width();
+                    auto frame_height = color.get_height();
+                    auto frame_size = frame_width * frame_height;
+                    auto color_data = (uint8_t*)color.get_data();
+
+                    auto color_copy = new uint8_t[frame_size * 3];
+                    memcpy(color_copy, color_data, frame_size * 3);
+                    emit drawColor(color_copy, frame_width, frame_height);
+                }
+            }
+
+        }
+
+    }
 };
 
 #endif // UTILS_H

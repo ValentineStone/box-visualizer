@@ -1,19 +1,11 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "utils.h"
+#include "flowlayout.h"
 
-void uint16_t_cleanupFunction(void *info) {
-    uint16_t* buff = (uint16_t*) info;
-    delete[] buff;
-}
-
-void uint8_t_cleanupFunction(void *info) {
-    uint8_t* buff = (uint8_t*) info;
-    delete[] buff;
-}
-
-void rgb_pixel_t_cleanupFunction(void *info) {
-    rgb_pixel_t* buff = (rgb_pixel_t*) info;
+template<typename T>
+void cleanupFunction(void *info) {
+    T* buff = (T*) info;
     delete[] buff;
 }
 
@@ -26,82 +18,45 @@ MainWindow::MainWindow(QWidget *parent)
 
     workerThread = new WorkerThread(this);
 
-
     workerThread->rotateA = ui->sliderA->value() * PI / 180;
     workerThread->rotateB = ui->sliderB->value() * PI / 180;
     workerThread->rotateC = ui->sliderC->value() * PI / 180;
     workerThread->zoomScale = ui->sliderD->value() / 100.;
     workerThread->sliceLevel = ui->sliderE->value() / 1000.;
 
-    connect(workerThread, &WorkerThread::resultReady1, this, [this](uint16_t* buff, size_t w, size_t h, bool cleanup){
-        uint16_t* copy = new uint16_t[w*h];
-        memcpy(copy, buff, w*h*2);
-        if (cleanup) delete[] buff;
-        auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_Grayscale16, uint16_t_cleanupFunction, copy));
-        ui->image1Label->setPixmap(pixmap);
+    connect(workerThread, &WorkerThread::drawDepth, this, [this](uint16_t* buff, size_t w, size_t h, int rotate){
+        auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_Grayscale16, cleanupFunction<uint16_t>, buff));
+        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        ui->depthLabel->setPixmap(pixmap);
     });
-    connect(workerThread, &WorkerThread::resultReady2, this, [this](uint16_t* buff, size_t w, size_t h, bool cleanup){
-        uint16_t* copy = new uint16_t[w*h];
-        memcpy(copy, buff, w*h*2);
-        if (cleanup) delete[] buff;
-        auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_Grayscale16, uint16_t_cleanupFunction, copy));
-        ui->image2Label->setPixmap(pixmap);
+
+    connect(workerThread, &WorkerThread::drawColor, this, [this](uint8_t* buff, size_t w, size_t h, int rotate){
+        auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_RGB888, cleanupFunction<uint8_t>, buff));
+        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        ui->colorLabel->setPixmap(pixmap);
     });
-    connect(workerThread, &WorkerThread::resultReady3, this, [this](uint8_t* buff, size_t w, size_t h, bool cleanup){
-        uint8_t* copy = new uint8_t[w*h*3];
-        memcpy(copy, buff, w*h*3);
-        if (cleanup) delete[] buff;
-        auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, uint8_t_cleanupFunction, copy));
-        ui->image3Label->setPixmap(pixmap);
-    });
-    connect(workerThread, &WorkerThread::resultReady, this, [this](QString label, void* buff, size_t w, size_t h, bool cleanup){
-        if (label == "label1") {
-            uint16_t* copy = new uint16_t[w*h];
-            memcpy(copy, buff, w*h*2);
-            if (cleanup) delete[] (uint16_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_Grayscale16, uint16_t_cleanupFunction, copy));
-            ui->image1Label->setPixmap(pixmap);
-        } else if (label == "label2") {
-            uint16_t* copy = new uint16_t[w*h];
-            memcpy(copy, buff, w*h*2);
-            if (cleanup) delete[] (uint16_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_Grayscale16, uint16_t_cleanupFunction, copy));
-            ui->image2Label->setPixmap(pixmap);
-        } else if (label == "label3") {
-            uint8_t* copy = new uint8_t[w*h*3];
-            memcpy(copy, buff, w*h*3);
-            if (cleanup) delete[] (uint8_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, uint8_t_cleanupFunction, copy));
-            ui->image3Label->setPixmap(pixmap);
-        } else if (label == "rgb") {
-            rgb_pixel_t* copy = new rgb_pixel_t[w*h];
-            memcpy(copy, buff, w*h*sizeof(rgb_pixel_t));
-            if (cleanup) delete[] (rgb_pixel_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, rgb_pixel_t_cleanupFunction, copy));
-            ui->image2Label->setPixmap(pixmap);
-        } else if (label == "rgb2") {
-            rgb_pixel_t* copy = new rgb_pixel_t[w*h];
-            memcpy(copy, buff, w*h*sizeof(rgb_pixel_t));
-            if (cleanup) delete[] (rgb_pixel_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, rgb_pixel_t_cleanupFunction, copy));
-            ui->image4Label->setPixmap(pixmap);
-        } else if (label == "rgb3") {
-            rgb_pixel_t* copy = new rgb_pixel_t[w*h];
-            memcpy(copy, buff, w*h*sizeof(rgb_pixel_t));
-            if (cleanup) delete[] (rgb_pixel_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, rgb_pixel_t_cleanupFunction, copy));
-            ui->image5Label->setPixmap(pixmap);
-        } else if (label == "rgb4") {
-            rgb_pixel_t* copy = new rgb_pixel_t[w*h];
-            memcpy(copy, buff, w*h*sizeof(rgb_pixel_t));
-            if (cleanup) delete[] (rgb_pixel_t*)buff;
-            auto pixmap = QPixmap::fromImage(QImage((uchar*)copy, w, h, QImage::Format_RGB888, rgb_pixel_t_cleanupFunction, copy));
-            ui->image6Label->setPixmap(pixmap);
+
+    connect(workerThread, &WorkerThread::drawRgb, this, [this](QString label, uint8_t* buff, size_t w, size_t h, int rotate){
+        static FlowLayout *flowLayout = new FlowLayout;
+        static QMap<QString, QLabel*> labelsMap;
+        static bool first = true;
+        if (first) {
+            first = false;
+            ui->flowWidget->setLayout(flowLayout);
         }
+        if (!labelsMap.contains(label)) {
+            labelsMap[label] = new QLabel();
+            flowLayout->addWidget(labelsMap[label]);
+        }
+        auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_RGB888, cleanupFunction<uint8_t>, buff));
+        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        labelsMap[label]->setPixmap(pixmap);
     });
-    connect(workerThread, &WorkerThread::statusBarResult, this, [this](QString text){
+
+    connect(workerThread, &WorkerThread::statusMessage, this, [this](QString text){
         ui->statusbar->showMessage(text);
     });
+
     connect(workerThread, &WorkerThread::debugText, this, [this](QString text){
         ui->debugText->clear();
         QTextDocument* doc = ui->debugText->document();
@@ -111,7 +66,9 @@ MainWindow::MainWindow(QWidget *parent)
         cursor.insertText(text);
         cursor.endEditBlock();
     });
+
     connect(workerThread, &WorkerThread::finished, workerThread, &QObject::deleteLater);
+
     workerThread->start();
 
     connect(ui->pauseBtn, &QPushButton::clicked, this, [this](){

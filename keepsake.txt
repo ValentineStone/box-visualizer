@@ -1,0 +1,399 @@
+if (stream_type == RS2_STREAM_DEPTH) {
+                    auto depth = frame.as<rs2::depth_frame>();
+
+                    auto sensor = rs2::sensor_from_frame(depth);
+                    auto depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
+                    auto frame_width = depth.get_width();
+                    auto frame_height = depth.get_height();
+                    auto frame_points_count = frame_width * frame_height;
+                    auto depth_data = (uint16_t*)depth.get_data();
+
+
+
+                    size_t dimensionX = frame_width;
+                    size_t dimensionY = frame_height;
+
+                    auto depth_data2 = new uint16_t[frame_points_count];
+
+                    uint16_t maxDepth = 0;
+                    for (size_t i = 0; i < frame_points_count; i++) {
+                        if (depth_data[i] > maxDepth)
+                            maxDepth = depth_data[i];
+                    }
+                    float scale_up = 2;//maxDepth * depth_units;
+
+                    for (size_t y = 0; y < frame_height; y++) {
+                        for (size_t x = 0; x < frame_width; x++) {
+                            auto i = y * frame_width + x;
+                            if (depth_data[i])
+                                depth_data2[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, 0.5, 9);//65535 - depth_data[i] * depth_units / scale_up * 65535;
+                            else
+                                depth_data2[i] = 0;
+
+                            if (y % 50 == 0)
+                                depth_data2[i] = 0;
+                            if (x % 100 == 0)
+                                depth_data2[i] = 0;
+                        }
+                    }
+
+                    emit resultReady("label1", depth_data2, frame_width, frame_height, true);
+
+
+
+                    // ==================================== color ====================
+
+                    rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
+                    memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
+
+                    std::vector<rs2::vertex> extra_points;
+                    rs2::pointcloud pointcloud;
+                    rs2::points rspoints = pointcloud.calculate(depth);
+                    auto vertices = rspoints.get_vertices();
+
+
+                    rs2::vertex center_mass{0,0,0};
+                    size_t center_mass_cnt = 0;
+                    for (size_t fy = 0; fy < frame_height; fy++) {
+                        for (size_t fx = 0; fx < frame_width; fx++) {
+                            auto i = fy * frame_width + fx;
+                            if (vertices[i].z == 0 || vertices[i].z < 0.25 || vertices[i].z > 5) continue;
+                            center_mass.z += vertices[i].z;
+                            center_mass_cnt++;
+                        }
+                    }
+                    center_mass.z /= center_mass_cnt;
+
+
+                    for (size_t i = 0; i < rspoints.size(); i++) {
+                        if (vertices[i].z == 0) continue;
+                        auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180,center_mass);
+                        size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                        size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                        uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 9);
+                        if (y < 0 || y >= dimensionY) continue;
+                        if (x < 0 || x >= dimensionX) continue;
+                        pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
+                    }
+
+                    /*
+                    for (size_t fy = 0; fy < frame_height; fy++) {
+                        for (size_t fx = frame_width * 0.75; fx < frame_width; fx++) {
+                            auto i = fy * frame_width + fx;
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180,center_mass);
+
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 2);
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = (uint8_t)(pixels[y * dimensionX + x] * 0.5);
+                        }
+                    }
+                    */
+
+
+                    rs2::vertex avg_bot_right{0,0,0};
+                    size_t avg_bot_right_cnt = 0;
+                    for (size_t fy = 0; fy < frame_height / 2; fy++) {
+                        for (size_t fx = frame_width*(guaranteed_floor + (1-guaranteed_floor)/2); fx < frame_width; fx++) {
+                            auto i = fy * frame_width + fx;
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180,center_mass);
+
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 2);
+
+                            avg_bot_right.x += vertex.x;
+                            avg_bot_right.y += vertex.y;
+                            avg_bot_right.z += vertex.z;
+                            avg_bot_right_cnt++;
+
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = 0;
+                            pixels[y * dimensionX + x].r = 128;
+                        }
+                    }
+                    avg_bot_right.x /= avg_bot_right_cnt;
+                    avg_bot_right.y /= avg_bot_right_cnt;
+                    avg_bot_right.z /= avg_bot_right_cnt;
+
+
+
+                    rs2::vertex avg_bot_left{0,0,0};
+                    size_t avg_bot_left_cnt = 0;
+                    for (size_t fy = frame_height - 1; fy > frame_height / 2; fy--) {
+                        for (size_t fx = frame_width*(guaranteed_floor + (1-guaranteed_floor)/2); fx < frame_width; fx++) {
+                            auto i = fy * frame_width + fx;
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180,center_mass);
+
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 2);
+
+                            avg_bot_left.x += vertex.x;
+                            avg_bot_left.y += vertex.y;
+                            avg_bot_left.z += vertex.z;
+                            avg_bot_left_cnt++;
+
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = 0;
+                            pixels[y * dimensionX + x].g = 128;
+                        }
+                    }
+                    avg_bot_left.x /= avg_bot_left_cnt;
+                    avg_bot_left.y /= avg_bot_left_cnt;
+                    avg_bot_left.z /= avg_bot_left_cnt;
+
+
+
+                    rs2::vertex avg_top_center{0,0,0};
+                    size_t avg_top_center_cnt = 0;
+                    for (size_t fy = 0; fy < frame_height; fy++) {
+                        for (size_t fx = frame_width * guaranteed_floor; fx < frame_width * (guaranteed_floor + (1-guaranteed_floor)/2); fx++) {
+                            auto i = fy * frame_width + fx;
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA,rotateB,rotateC+90*PI/180,center_mass);
+
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 2);
+
+                            avg_top_center.x += vertex.x;
+                            avg_top_center.y += vertex.y;
+                            avg_top_center.z += vertex.z;
+                            avg_top_center_cnt++;
+
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = 0;
+                            pixels[y * dimensionX + x].b = 128;
+                        }
+                    }
+                    avg_top_center.x /= avg_top_center_cnt;
+                    avg_top_center.y /= avg_top_center_cnt;
+                    avg_top_center.z /= avg_top_center_cnt;
+
+                    rs2::vertex avg_bot_center;
+                    avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
+                    avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
+                    avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
+
+                    extra_points.push_back(avg_top_center);
+                    extra_points.push_back(avg_bot_left);
+                    extra_points.push_back(avg_bot_right);
+                    extra_points.push_back(avg_bot_center);
+                    for (auto& vertex : extra_points) {
+                        size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                        size_t y = vertex.y * zoomScale * dimensionY/2 + dimensionY/2;
+                        if (y < 0 || y >= dimensionY) continue;
+                        if (x < 0 || x >= dimensionX) continue;
+                        pixels[y * dimensionX + x] = std::numeric_limits<uint8_t>::max();
+                    }
+
+                    for (auto& vertex1 : extra_points) {
+                        for (auto& vertex2 : extra_points) {
+                            if (&vertex1 == &vertex2) continue;
+                            size_t x1 = vertex1.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y1 = vertex1.y * zoomScale * dimensionY/2 + dimensionY/2;
+                            size_t x2 = vertex2.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y2 = vertex2.y * zoomScale * dimensionY/2 + dimensionY/2;
+                            draw_line(pixels, dimensionX, dimensionY, std::numeric_limits<uint8_t>::max(), x1, y1, x2, y2);
+                        }
+                    }
+
+                    emit drawRgb("rgb", pixels, dimensionX, dimensionY, 90);
+
+                    float rotation2 = angle_between(avg_top_center.z, avg_top_center.y, avg_bot_center.z, avg_bot_center.y);
+                    auto avg_bot_right_2 = rotate(avg_bot_right, -rotation2, 0,0,center_mass);
+                    auto avg_bot_left_2 = rotate(avg_bot_left, -rotation2, 0,0,center_mass);
+                    float rotation1 = angle_between(avg_bot_right_2.x, avg_bot_right_2.y, avg_bot_left_2.x, avg_bot_left_2.y);
+
+                    auto floor_level = rotate(avg_bot_center,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1,center_mass);
+
+                    if (true) {
+                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
+                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
+                        std::vector<rs2::vertex> extra_points;
+                        rs2::pointcloud pointcloud;
+                        rs2::points rspoints = pointcloud.calculate(depth);
+                        auto vertices = rspoints.get_vertices();
+                        for (size_t i = 0; i < rspoints.size(); i++) {
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA - rotation2,rotateB,rotateC+90*PI/180 - rotation1,center_mass);
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 9);
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
+                        }
+                        emit drawRgb("rgb2", pixels, dimensionX, dimensionY, 90);
+                    }
+
+                    float avgCenterX1 = 0, avgCenterY1 = 0, countCenter1 = 0;
+                    float avgCenterX2 = 0, avgCenterY2 = 0, countCenter2 = 0;
+
+                    if (true) {
+                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
+                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
+                        std::vector<rs2::vertex> extra_points;
+                        rs2::pointcloud pointcloud;
+                        rs2::points rspoints = pointcloud.calculate(depth);
+                        auto vertices = rspoints.get_vertices();
+                        for (size_t i = 0; i < rspoints.size(); i++) {
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA - rotation2-90*PI/180,rotateB,rotateC+90*PI/180 - rotation1,center_mass);
+                            //if (i % 100 == 0) qDebug() << point_toString(vertex);
+                            if (vertex.z < floor_level.z + sliceLevel + boxHeight - sliceEpsilon || vertex.z > floor_level.z + sliceLevel + boxHeight + sliceEpsilon) continue;
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 9);
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
+                        }
+
+
+
+                        for (size_t x = 0; x < dimensionX; x++) {
+                            for (size_t y = 0; y < dimensionY; y++) {
+
+                            }
+                        }
+
+                        /*
+                        rgb_pixel_t green{0,255,0};
+                        float prevCenterX = -1;
+                        float prevCenterX_Y = -1;
+                        size_t minCenterX = 0, minCenterY = 0;
+                        size_t maxCenterX = 0, maxCenterY = 0;
+                        for (size_t y = 0; y < dimensionY; y++) {
+                            float centerX = 0;
+                            size_t countX = 0;
+                            for (size_t x = 0; x < dimensionX; x++) {
+                                size_t i = y * dimensionX + x;
+                                if (pixels[i]) {
+                                    centerX += x;
+                                    countX++;
+                                }
+                            }
+                            if (countX > 10) {
+                                centerX /= countX;
+                                if (centerX < 0 || centerX > dimensionX) continue;
+                                pixels[y * dimensionX + (size_t)centerX].g = 255;
+                                if (prevCenterX != -1) {
+                                    draw_line(pixels,dimensionX, dimensionY,green,prevCenterX, prevCenterX_Y,centerX,y);
+                                }
+
+                                if (minCenterY == 0) {
+                                    minCenterY = y;
+                                    minCenterX = centerX;
+                                }
+                                if (y > maxCenterY) {
+                                    maxCenterY = y;
+                                    maxCenterX = centerX;
+                                }
+                                prevCenterX = centerX;
+                                prevCenterX_Y = y;
+                            }
+                        }
+                        size_t dCenterY = maxCenterY - minCenterY;
+                        for (size_t y = minCenterY; y < minCenterY + dCenterY / 2; y++) {
+                            for (size_t x = 0; x < dimensionX; x++) {
+                                size_t i = y * dimensionX + x;
+                                if (pixels[i]) {
+                                    pixels[i] = 0;
+                                    pixels[i].r = 255;
+
+                                    avgCenterX1 += x;
+                                    avgCenterY1 += y;
+                                    countCenter1++;
+                                }
+                            }
+                        }
+                        avgCenterX1 /= countCenter1;
+                        avgCenterY1 /= countCenter1;
+                        for (size_t y = minCenterY + dCenterY / 2; y < maxCenterY; y++) {
+                            for (size_t x = 0; x < dimensionX; x++) {
+                                size_t i = y * dimensionX + x;
+                                if (pixels[i]) {
+                                    pixels[i] = 0;
+                                    pixels[i].b = 255;
+
+                                    avgCenterX2 += x;
+                                    avgCenterY2 += y;
+                                    countCenter2++;
+                                }
+                            }
+                        }
+                        avgCenterX2 /= countCenter2;
+                        avgCenterY2 /= countCenter2;
+
+
+                        draw_line(pixels,dimensionX, dimensionY,(uint8_t)255,avgCenterX1, avgCenterY1,avgCenterX2,avgCenterY2);
+                        */
+
+                        emit drawRgb("rgb3", pixels, dimensionX, dimensionY, 90);
+                    }
+
+                    float rotation3 = angle_between(avgCenterY1, avgCenterX1, avgCenterY2, avgCenterX2);
+                    //emit statusMessage(QString::number(rotation3));
+
+                    if (true) {
+                        rgb_pixel_t* pixels = new rgb_pixel_t[dimensionX * dimensionY];
+                        memset(pixels, 0, dimensionX * dimensionY * sizeof(rgb_pixel_t));
+                        std::vector<rs2::vertex> extra_points;
+                        rs2::pointcloud pointcloud;
+                        rs2::points rspoints = pointcloud.calculate(depth);
+                        auto vertices = rspoints.get_vertices();
+                        //qDebug() << point_toString(avg_bot_center) << "   |   " << point_toString(floor_level);
+                        for (size_t i = 0; i < rspoints.size(); i++) {
+                            if (vertices[i].z == 0) continue;
+                            auto vertex = rotate(vertices[i],rotateA - rotation2-90*PI/180,rotateB,rotateC+90*PI/180 - rotation1,center_mass);
+                            //if (i % 100 == 0) qDebug() << point_toString(vertex);
+                            //if (vertex.z < sliceLevel - 0.1 || vertex.z > sliceLevel + 0.1) continue;
+                            if (vertex.z < floor_level.z + sliceLevel - sliceEpsilon || vertex.z > floor_level.z + sliceLevel + sliceEpsilon) continue;
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionX/2 + dimensionY/2;
+                            uint8_t color = to_grayscale<uint8_t>(vertices[i].z, 0.5, 9);
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = pixels[y * dimensionX + x] < color ? color : pixels[y * dimensionX + x];
+                        }
+
+                        extra_points.push_back(rotate(avg_top_center,rotateA - rotation2-90*PI/180,rotateB,rotateC- rotation1,center_mass));
+                        extra_points.push_back(rotate(avg_bot_left,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1,center_mass));
+                        extra_points.push_back(rotate(avg_bot_right,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1,center_mass));
+                        extra_points.push_back(rotate(avg_bot_center,rotateA - rotation2-90*PI/180,rotateB,rotateC - rotation1,center_mass));
+                        for (auto& vertex : extra_points) {
+                            size_t x = vertex.x * zoomScale * dimensionX/2 + dimensionX/2;
+                            size_t y = vertex.y * zoomScale * dimensionY/2 + dimensionY/2;
+                            if (y < 0 || y >= dimensionY) continue;
+                            if (x < 0 || x >= dimensionX) continue;
+                            pixels[y * dimensionX + x] = std::numeric_limits<uint8_t>::max();
+                        }
+
+                        rgb_pixel_t blue{0,0,255};
+
+                        for (auto& vertex1 : extra_points) {
+                            for (auto& vertex2 : extra_points) {
+                                if (&vertex1 == &vertex2) continue;
+                                size_t x1 = vertex1.x * zoomScale * dimensionX/2 + dimensionX/2;
+                                size_t y1 = vertex1.y * zoomScale * dimensionY/2 + dimensionY/2*0;
+                                size_t x2 = vertex2.x * zoomScale * dimensionX/2 + dimensionX/2;
+                                size_t y2 = vertex2.y * zoomScale * dimensionY/2 + dimensionY/2*0;
+                                draw_line(pixels, dimensionX, dimensionY, blue, x1, y1, x2, y2);
+                            }
+                        }
+
+
+                        emit drawRgb("rgb4", pixels, dimensionX, dimensionY, 90);
+                    }
+
+                }
