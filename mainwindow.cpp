@@ -9,6 +9,8 @@ void cleanupFunction(void *info) {
     delete[] buff;
 }
 
+QLabel* firstLabel;
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -26,13 +28,21 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(workerThread, &WorkerThread::drawDepth, this, [this](uint16_t* buff, size_t w, size_t h, int rotate){
         auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_Grayscale16, cleanupFunction<uint16_t>, buff));
-        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        QTransform tr;
+        tr.rotate(rotate);
+        float scale = w > h ? 320. / w : 320. / h;
+        tr.scale(scale, scale);
+        pixmap = pixmap.transformed(tr);
         ui->depthLabel->setPixmap(pixmap);
     });
 
     connect(workerThread, &WorkerThread::drawColor, this, [this](uint8_t* buff, size_t w, size_t h, int rotate){
         auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_RGB888, cleanupFunction<uint8_t>, buff));
-        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        QTransform tr;
+        tr.rotate(rotate);
+        float scale = w > h ? 320. / w : 320. / h;
+        tr.scale(scale, scale);
+        pixmap = pixmap.transformed(tr);
         ui->colorLabel->setPixmap(pixmap);
     });
 
@@ -40,16 +50,21 @@ MainWindow::MainWindow(QWidget *parent)
         static FlowLayout *flowLayout = new FlowLayout;
         static QMap<QString, QLabel*> labelsMap;
         static bool first = true;
-        if (first) {
-            first = false;
-            ui->flowWidget->setLayout(flowLayout);
-        }
         if (!labelsMap.contains(label)) {
             labelsMap[label] = new QLabel();
             flowLayout->addWidget(labelsMap[label]);
         }
+        if (first) {
+            first = false;
+            ui->flowWidget->setLayout(flowLayout);
+            firstLabel = labelsMap[label];
+        }
         auto pixmap = QPixmap::fromImage(QImage((uchar*)buff, w, h, QImage::Format_RGB888, cleanupFunction<uint8_t>, buff));
-        if (rotate) pixmap = pixmap.transformed(QTransform().rotate(rotate));
+        QTransform tr;
+        tr.rotate(rotate);
+        float scale = w > h ? 320. / w : 320. / h;
+        tr.scale(scale, scale);
+        pixmap = pixmap.transformed(tr);
         labelsMap[label]->setPixmap(pixmap);
     });
 
@@ -150,22 +165,39 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *event)
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
     QPoint pos = QCursor::pos();
-    dragPrevX = pos.x();
-    dragPrevY = pos.y();
-    dragging = true;
+
+
+    auto lookatGeometry = firstLabel->geometry();
+    auto lookatTopLeft = firstLabel->mapToGlobal(lookatGeometry.topLeft());
+
+    if (pos.x() >= lookatTopLeft.x() && pos.x() < lookatTopLeft.x() + lookatGeometry.width() && pos.y() >= lookatTopLeft.y() && pos.y() < lookatTopLeft.y() + lookatGeometry.height()) {
+        workerThread->lookat_x = (pos.x() - lookatTopLeft.x()) / (float)lookatGeometry.width();
+        workerThread->lookat_y = (pos.y() - lookatTopLeft.y()) / (float)lookatGeometry.height();
+    } else {
+        dragPrevX = pos.x();
+        dragPrevY = pos.y();
+        dragging = true;
+    }
+
     event->accept();
 }
 
 void MainWindow::mouseMoveEvent(QMouseEvent *event){
-    if (dragging) {
-        QPoint pos = QCursor::pos();
-        int dx = dragPrevX - pos.x();
-        int dy = dragPrevY - pos.y();
-        dragPrevX = pos.x();
-        dragPrevY = pos.y();
+    QPoint pos = QCursor::pos();
+    int dx = dragPrevX - pos.x();
+    int dy = dragPrevY - pos.y();
+    dragPrevX = pos.x();
+    dragPrevY = pos.y();
 
-        ui->sliderA->setValue(ui->sliderA->value() + dy / 2);
-        ui->sliderB->setValue(ui->sliderB->value() - dx / 2);
+    auto lookatGeometry = firstLabel->geometry();
+    auto lookatTopLeft = firstLabel->mapToGlobal(lookatGeometry.topLeft());
+
+    if (pos.x() >= lookatTopLeft.x() && pos.x() < lookatTopLeft.x() + lookatGeometry.width() && pos.y() >= lookatTopLeft.y() && pos.y() < lookatTopLeft.y() + lookatGeometry.height()) {
+        workerThread->lookat_x = (pos.x() - lookatTopLeft.x()) / (float)lookatGeometry.width();
+        workerThread->lookat_y = (pos.y() - lookatTopLeft.y()) / (float)lookatGeometry.height();
+    } else if (dragging) {
+        ui->sliderA->setValue(ui->sliderA->value() + dx / 2);
+        ui->sliderB->setValue(ui->sliderB->value() + dy / 2);
     }
     event->accept();
 }

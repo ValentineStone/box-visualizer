@@ -53,7 +53,7 @@ Point rotate(const Point& point, float a, float b, float c, const Point& around)
 
 
 template<typename Point>
-QString point_toString(Point p) {
+QString pointToString(Point p) {
     return QString::number(p.x,'f',4) + ", " + QString::number(p.y,'f',4) + ", " + QString::number(p.z,'f',4);
 }
 
@@ -140,8 +140,6 @@ Point angle(const Point& from, const Point& to) {
     rotation.y = 0;
     rotation.z = angle_to_z;
 
-    qDebug() << point_toString(vector) << point_toString(rotation);
-
     return rotation;
 }
 
@@ -169,8 +167,6 @@ template<typename Point = rs2::vertex, typename Color = rgb_t>
 struct shape_t {
     Point* points;
     Color* colors;
-    Color line_color{std::numeric_limits<uint8_t>::max()};
-    std::vector<Point> lines;
     size_t width;
     size_t height;
     size_t size;
@@ -198,7 +194,7 @@ struct shape_t {
         }
     }
 
-    shape_t(shape_t& other): shape_t(other.width, other.height, other.points) {}
+    shape_t(const shape_t& other): shape_t(other.width, other.height, other.points) {}
 
     ~shape_t() {
         delete[] points;
@@ -248,7 +244,7 @@ struct shape_t {
     }
 
     template<typename Pixel = rgb_t>
-    uint8_t* render(int scale = 1) const {
+    uint8_t* render(float scale = 1, size_t* render_map = nullptr) const {
         Pixel* pixels = (Pixel*)new uint8_t[size * sizeof(Pixel)];
         memset(pixels, 0, size * sizeof(Pixel));
         for (size_t i = 0; i < size; i++) {
@@ -258,17 +254,8 @@ struct shape_t {
             size_t y = point.y * scale * width/2 + height/2;
             if (y < 0 || y >= height) continue;
             Pixel& pixel = pixels[y * width + x];
+            if (render_map) render_map[y * width + x] = i;
             if (colors[i]) pixel = colors[i];
-        }
-        for (auto& vertex1 : lines) {
-            for (auto& vertex2 : lines) {
-                if (&vertex1 == &vertex2) continue;
-                size_t x1 = vertex1.x * scale * width/2 + width/2;
-                size_t y1 = vertex1.y * scale * width/2 + height/2;
-                size_t x2 = vertex2.x * scale * width/2 + width/2;
-                size_t y2 = vertex2.y * scale * width/2 + height/2;
-                draw_line(pixels, width, height, line_color, x1, y1, x2, y2);
-            }
         }
         return (uint8_t*)pixels;
     }
@@ -306,6 +293,27 @@ struct shape_t {
         center_mass.z /= center_mass_cnt;
         return center_mass;
     }
+
+    shape_t& slice_x(float min, float max) {
+        for (size_t i = 0; i < size; i++)
+            if (points[i].x < min || points[i].x > max)
+                colors[i] = 0;
+        return *this;
+    }
+
+    shape_t& slice_y(float min, float max) {
+        for (size_t i = 0; i < size; i++)
+            if (points[i].y < min || points[i].y > max)
+                colors[i] = 0;
+        return *this;
+    }
+
+    shape_t& slice_z(float min, float max) {
+        for (size_t i = 0; i < size; i++)
+            if (points[i].z < min || points[i].z > max)
+                colors[i] = 0;
+        return *this;
+    }
 };
 
 
@@ -320,12 +328,18 @@ public:
     float rotateA = 0;
     float rotateB = 0;
     float rotateC = 0;
-    float zoomScale = 300;
+    float zoomScale = 1;
     float sliceLevel = 0;
     float boxHeight = 0.4;
 
+    float lookat_x = 0;
+    float lookat_y = 0;
+
     float sliceEpsilon = 0.1;
     float guaranteed_floor = 0.9;
+
+    float depth_min = 0.5;
+    float depth_max = 5;
 signals:
     void drawDepth(uint16_t* data, size_t width, size_t height, int rotate = 0);
     void drawColor(uint8_t* data, size_t width, size_t height, int rotate = 0);
@@ -335,10 +349,6 @@ signals:
 
 private:
     std::mutex wait_for_frames_mutex;
-
-    void renderRgb(QString name, const shape_t<>& shape, int rotate = 0) {
-        emit drawRgb(name, shape.render(), shape.width, shape.height, rotate);
-    }
 
     void run() override {
         rs2::config rs_config;
@@ -352,7 +362,7 @@ private:
             //rs_config.enable_device_from_file("/home/v/flyover.bag");
             //rs_config.enable_device_from_file("/home/v/boxes.bag");
             //rs_config.enable_device_from_file("/home/v/Documents/20240229_082253.bag");
-            //rs_config.enable_device_from_file("/home/v/Downloads/test4.bag");
+            rs_config.enable_device_from_file("/home/v/Downloads/test4.bag");
         }
 
         rs2::pipeline rs_pipeline;
@@ -379,15 +389,6 @@ private:
                     auto frame_height = depth.get_height();
                     auto frame_size = frame_width * frame_height;
                     auto depth_data = (uint16_t*)depth.get_data();
-                    float depth_min = 0.5;
-                    float depth_max = 5;
-
-
-
-                    float rotation1 = 0;
-                    float rotation2 = 0;
-                    float rot1 = 0;
-                    float rot2 = 0;
 
                     auto depth_copy = new uint16_t[frame_size];
                     memcpy(depth_copy, depth_data, frame_size * sizeof(uint16_t));
@@ -396,10 +397,9 @@ private:
                     emit drawDepth(depth_copy, frame_width, frame_height, 90);
 
                     shape_t shape_original(frame_width, frame_height, depth_data, intr, depth_units);
-                    shape_original.colorize(depth_min, depth_max);
 
                     auto center_mass = shape_original.center_mass(depth_min, depth_max);
-                    {
+
                     auto avg_bot_right = shape_original.center_mass(
                         frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
                         frame_width,
@@ -433,102 +433,87 @@ private:
                     avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
                     avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
 
-                    shape_original.lines.push_back(avg_bot_right);
-                    shape_original.lines.push_back(avg_bot_left);
-                    shape_original.lines.push_back(avg_top_center);
-                    shape_original.lines.push_back(avg_bot_center);
-                    shape_original.line_color = rgb_t{255,0,0};
+                    size_t* shape_original_render_map = new size_t[frame_size];
+                    std::fill_n(shape_original_render_map, frame_size, -1);
+                    emit drawRgb(
+                        "shape_original",
+                        shape_t(shape_original)
+                            .rotate(rotateA,rotateB,rotateC,center_mass)
+                            .colorize(depth_min, depth_max)
+                            .render(zoomScale, shape_original_render_map),
+                        frame_width,
+                        frame_height,
+                        90
+                    );
 
-                    renderRgb("shape_original", shape_original);
+                    // account for 90 degree rotation
+                    size_t lookat_y = (frame_height-1) - this->lookat_x * frame_height;
+                    size_t lookat_x = this->lookat_y * frame_width;
+                    size_t lookat_i = lookat_y * frame_width + lookat_x;
+                    float lookat_depth = std::numeric_limits<float>::quiet_NaN();
+                    if (shape_original_render_map[lookat_i] != -1)
+                        lookat_depth = shape_original.points[shape_original_render_map[lookat_i]].z;
 
+                    emit statusMessage(QString("Lookat (%1,%2) depth = %3").arg(lookat_x).arg(lookat_y).arg(lookat_depth));
 
-
-
-                    rot1 = angle_between(avg_top_center.z, avg_top_center.x, avg_bot_center.z, avg_bot_center.x);
+                    float rot1 = angle_between(avg_top_center.z, avg_top_center.x, avg_bot_center.z, avg_bot_center.x);
                     auto avg_bot_right_2 = rotate(avg_bot_right, 0, -rot1, 0,center_mass);
                     auto avg_bot_left_2 = rotate(avg_bot_left, 0, -rot1, 0,center_mass);
-                    rot2 = PI - angle_between(avg_bot_right_2.y, avg_bot_right_2.x, avg_bot_left_2.y, avg_bot_left_2.x);
-
-
-
-                    shape_t shape_floored2(shape_original);
-                    shape_floored2.rotate(0,-rot1,-rot2,center_mass).rotate(0,0,0,center_mass).rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
-                    renderRgb("shape_floored22", shape_floored2);
-
-                    }
-
-                    shape_t shape_rotated(shape_original);
-                    shape_rotated.rotate(0, 0, PI/2, center_mass).colorize(depth_min, depth_max);
-
-                    {
-                        auto avg_bot_right = shape_rotated.center_mass(
-                            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
-                            frame_width,
-                            0,
-                            frame_height / 2,
-                            depth_min,
-                            depth_max
-                            );
-
-                        auto avg_bot_left = shape_rotated.center_mass(
-                            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
-                            frame_width,
-                            frame_height / 2,
-                            frame_height,
-                            depth_min,
-                            depth_max
-                            );
-
-                        auto avg_top_center = shape_rotated.center_mass(
-                            frame_width * guaranteed_floor,
-                            frame_width * (guaranteed_floor + (1 - guaranteed_floor) / 2),
-                            0,
-                            frame_height,
-                            depth_min,
-                            depth_max
-                            );
-
-
-                        rs2::vertex avg_bot_center;
-                        avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
-                        avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
-                        avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
-
-                        shape_rotated.lines.push_back(avg_bot_right);
-                        shape_rotated.lines.push_back(avg_bot_left);
-                        shape_rotated.lines.push_back(avg_top_center);
-                        shape_rotated.lines.push_back(avg_bot_center);
-                        shape_rotated.line_color = rgb_t{255,0,0};
-
-                        renderRgb("shape_rotated", shape_rotated);
-
-                        rotation1 = angle_between(avg_top_center.z, avg_top_center.y, avg_bot_center.z, avg_bot_center.y);
-                        auto avg_bot_right_2 = rotate(avg_bot_right, rotation1, 0,0,center_mass);
-                        auto avg_bot_left_2 = rotate(avg_bot_left, rotation1, 0,0,center_mass);
-                        rotation2 = angle_between(avg_bot_right_2.x, avg_bot_right_2.y, avg_bot_left_2.x, avg_bot_left_2.y);
-
-
-                        shape_t shape_rotated2(shape_original);
-                        shape_rotated2.rotate(rotation1, 0, 90*PI/180-rotation2, center_mass).colorize(depth_min, depth_max);
-                        renderRgb("shape_rotated2", shape_rotated2);
-
-                        shape_t shape_floored2(shape_original);
-                        shape_floored2.rotate(0,-rotation1,-rotation2,center_mass).rotate(0,0,0,center_mass).rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
-                        renderRgb("shape_floored2", shape_floored2);
-                    }
-
-
+                    float rot2 = PI - angle_between(avg_bot_right_2.y, avg_bot_right_2.x, avg_bot_left_2.y, avg_bot_left_2.x);
 
                     shape_t shape_floored(shape_original);
-                    shape_floored.rotate(rotateA, rotateB, rotateC, center_mass).colorize(depth_min, depth_max);
-                    renderRgb("shape_floored", shape_floored);
+                    shape_floored.rotate(0,-rot1,-rot2,center_mass);
 
-                    rs2::vertex an{rotateA,rotateB,rotateC};
-                    rs2::vertex an2{rotation1,rotation2,0};
-                    rs2::vertex an3{rot1,rot2,0};
+                    emit drawRgb(
+                        "shape_floored",
+                        shape_t(shape_floored)
+                            .rotate(rotateA,rotateB,rotateC,center_mass)
+                            .colorize(depth_min, depth_max)
+                            .render(zoomScale),
+                        frame_width,
+                        frame_height,
+                        90
+                        );
 
-                    statusMessage(point_toString(an) + " : " + point_toString(an2) + " : " + point_toString(an3));
+                    shape_t shape_topview(shape_floored);
+                    shape_topview.rotate(0,-PI/2,0,center_mass);
 
+                    emit drawRgb(
+                        "shape_topview",
+                        shape_t(shape_topview)
+                            .rotate(rotateA,rotateB,rotateC,center_mass)
+                            .colorize(depth_min, depth_max)
+                            .render(zoomScale),
+                        frame_width,
+                        frame_height,
+                        90
+                    );
+
+                    auto floor_level = rotate(avg_top_center,0,-PI/2-rot1,-rot2,center_mass);
+
+                    emit drawRgb(
+                        "shape_topview_floor",
+                        shape_t(shape_topview)
+                            .rotate(rotateA,rotateB,rotateC,center_mass)
+                            .colorize(depth_min, depth_max)
+                            .slice_z(floor_level.z - sliceEpsilon, floor_level.z + sliceEpsilon)
+                            .render(zoomScale),
+                        frame_width,
+                        frame_height,
+                        90
+                    );
+
+                    emit drawRgb(
+                        "shape_topview_box",
+                        shape_t(shape_topview)
+                            .rotate(rotateA,rotateB,rotateC,center_mass)
+                            .colorize(depth_min, depth_max)
+                            .slice_z(floor_level.z - boxHeight + sliceLevel - sliceEpsilon, floor_level.z - boxHeight + sliceLevel + sliceEpsilon)
+                            .render(zoomScale),
+                        frame_width,
+                        frame_height,
+                        90
+                    );
 
                 } else if (stream_type == RS2_STREAM_COLOR) {
                     auto color = frame.as<rs2::video_frame>();
@@ -539,7 +524,7 @@ private:
 
                     auto color_copy = new uint8_t[frame_size * 3];
                     memcpy(color_copy, color_data, frame_size * 3);
-                    emit drawColor(color_copy, frame_width, frame_height);
+                    emit drawColor(color_copy, frame_width, frame_height, 90);
                 }
             }
 
