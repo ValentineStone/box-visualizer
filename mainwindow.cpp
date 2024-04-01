@@ -2,6 +2,7 @@
 #include "./ui_mainwindow.h"
 #include "utils.h"
 #include "flowlayout.h"
+#include <QFileDialog>
 
 template<typename T>
 void cleanupFunction(void *info) {
@@ -142,6 +143,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->boxHeightEdit, &QLineEdit::textChanged, this, updateBoxHeight);
     connect(ui->palletHeightEdit, &QLineEdit::textChanged, this, updateBoxHeight);
     updateBoxHeight("");
+
+    connect(ui->actionView_from_camera, &QAction::triggered, this, [this](){
+        workerThread->setDataSource("live");
+    });
+    connect(ui->actionLoad_from_file, &QAction::triggered, this, [this](){
+        auto file = QFileDialog::getOpenFileName(this, "Open file", QString(), "*.bin *.bag");
+        workerThread->setDataSource(file);
+    });
 
 
 }

@@ -4,13 +4,15 @@
 #include <librealsense2/rs.hpp>
 #include <opencv2/opencv.hpp>
 #include <iostream>
-#include <mutex>
+#include <QMutex>
 #include <limits>
 #include <QString>
 #include <QThread>
 #include <QImage>
 #include <QPixmap>
 #include <QDebug>
+#include <filesystem>
+#include <fstream>
 
 #ifndef PI
 #define PI  3.14159265358979323846
@@ -316,6 +318,126 @@ struct shape_t {
     }
 };
 
+struct distances_t {
+    uint16_t frame_width = 0;
+    uint16_t frame_height = 0;
+    float depth_units = 0;
+    uint16_t* data = nullptr;
+    bool owns_data = false;
+
+    distances_t() = default;
+    distances_t(const rs2::depth_frame& frame) {
+        frame_width = frame.get_width();
+        frame_height = frame.get_height();
+        if (auto sensor = rs2::sensor_from_frame(frame)) {
+            depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
+            data = (uint16_t*)frame.get_data();
+        }
+        else {
+            data = nullptr;
+        }
+    }
+    float get_distance(uint16_t x, uint16_t y) {
+        return data[frame_width * y + x] * depth_units;
+    }
+    int serialize_size() {
+        if (!data) return -1;
+        return 2 + 2 + 4 + (2 * frame_width * frame_height);
+    }
+    bool serialize(uint8_t* buff) {
+        if (!data) return false;
+        *(uint16_t*)(buff + 0) = frame_width;
+        *(uint16_t*)(buff + 2) = frame_height;
+        *(float*)(buff + 4) = depth_units;
+        auto cpy_n = frame_width * frame_height * 2;
+        memcpy(buff + 8, data, cpy_n);
+        return true;
+    }
+    bool serialize_to_file(const std::filesystem::path& path) {
+        auto distances_bin_buff_len = serialize_size();
+        if (distances_bin_buff_len < 0)
+            return false;
+        uint8_t* distances_bin_buff = new uint8_t[distances_bin_buff_len];
+        if (serialize(distances_bin_buff)) {
+            std::ofstream distances_file;
+            distances_file.open(path);
+            distances_file.write((const char*)distances_bin_buff, distances_bin_buff_len);
+            distances_file.close();
+            delete[] distances_bin_buff;
+            return true;
+        }
+        else {
+            delete[] distances_bin_buff;
+            return false;
+        }
+    }
+    distances_t(const uint8_t* buff, size_t len) {
+        if (len < 8) {
+            data  = nullptr;
+            return;
+        }
+        frame_width = *(uint16_t*)(buff + 0);
+        frame_height = *(uint16_t*)(buff + 2);
+        depth_units = *(float*)(buff + 4);
+        if (len < serialize_size()) {
+            data  = nullptr;
+            return;
+        }
+        data = new uint16_t[frame_width * frame_height];
+        owns_data = true;
+        auto cpy_n = frame_width * frame_height * 2;
+        memcpy(data, buff + 8, cpy_n);
+    }
+    distances_t(std::filesystem::path path) {
+        std::ifstream distances_file;
+        distances_file.open(path);
+        distances_file.read((char*)&frame_width, 2);
+        distances_file.read((char*)&frame_height, 2);
+        distances_file.read((char*)&depth_units, 4);
+        data = new uint16_t[frame_width * frame_height];
+        owns_data = true;
+        auto cpy_n = frame_width * frame_height * 2;
+        distances_file.read((char*)data, cpy_n);
+        distances_file.close();
+    }
+    ~distances_t() {
+        if (owns_data)
+            delete[] data;
+        data = nullptr;
+    }
+    std::string to_string() {
+        if (!data) return "";
+        std::stringstream ss;
+        ss << frame_width << ',' << frame_height << ',' << depth_units << "\r\n\r\n";
+        for (uint16_t y = 0; y < frame_height; y++) {
+            for (uint16_t x = 0; x < frame_width; x++) {
+                ss << get_distance(x, y) << ',';
+            }
+            ss << "\r\n";
+        }
+        return ss.str();
+    }
+    operator std::string() {
+        return to_string();
+    }
+};
+
+template <typename T = std::nullptr_t>
+void save_to_file(const std::filesystem::path& path, const void* buff, size_t size) {
+    std::ofstream file;
+    file.open(path);
+    file.write((const char*)buff, size);
+    file.close();
+}
+
+template <typename T = std::nullptr_t>
+void load_from_file(const std::filesystem::path& path, void* buff, size_t size) {
+    std::ifstream file;
+    file.open(path);
+    file.read((char*)buff, size);
+    file.close();
+}
+
 
 class WorkerThread : public QThread
 {
@@ -340,6 +462,42 @@ public:
 
     float depth_min = 0.5;
     float depth_max = 5;
+
+    distances_t* loaded_distances = nullptr;
+    rs2_intrinsics loaded_intr;
+
+    void setDataSource(QString dataSource) {
+        loop_mutex.lock();
+        if (pipelineStarted) {
+            rs_pipeline.stop();
+            pipelineStarted = false;
+        }
+        if (loaded_distances)
+            delete loaded_distances;
+        loaded_distances = nullptr;
+
+        if (dataSource == "live") {
+            rs2::config rs_config;
+            //rs_config.enable_stream(RS2_STREAM_COLOR, 320, 240, RS2_FORMAT_RGB8, 30); // 1920, 1080
+            rs_config.enable_stream(RS2_STREAM_DEPTH, 320, 240, RS2_FORMAT_Z16, 30);   // 1024, 768
+            //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
+            //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
+
+            rs_profile = rs_pipeline.start(rs_config);
+            pipelineStarted = true;
+        } else if (dataSource.endsWith(".bag")) {
+            rs2::config rs_config;
+            rs_config.enable_device_from_file(dataSource.toStdString());
+            rs_profile = rs_pipeline.start(rs_config);
+            pipelineStarted = true;
+        } else if (dataSource.endsWith("distances.bin")) {
+            presentFromFiles(dataSource);
+        } else {
+            // do nothing
+        }
+        loop_mutex.unlock();
+    }
+
 signals:
     void drawDepth(uint16_t* data, size_t width, size_t height, int rotate = 0);
     void drawColor(uint8_t* data, size_t width, size_t height, int rotate = 0);
@@ -348,188 +506,205 @@ signals:
     void debugText(QString);
 
 private:
-    std::mutex wait_for_frames_mutex;
+    rs2::pipeline rs_pipeline;
+    rs2::pipeline_profile rs_profile;
+    QMutex loop_mutex;
+    bool pipelineStarted = false;
 
     void run() override {
-        rs2::config rs_config;
-
-        if (true) {
-            //rs_config.enable_stream(RS2_STREAM_COLOR, 320, 240, RS2_FORMAT_RGB8, 30); // 1920, 1080
-            rs_config.enable_stream(RS2_STREAM_DEPTH, 320, 240, RS2_FORMAT_Z16, 30);   // 1024, 768
-            //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
-            //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
-        } else {
-            //rs_config.enable_device_from_file("/home/v/flyover.bag");
-            //rs_config.enable_device_from_file("/home/v/boxes.bag");
-            //rs_config.enable_device_from_file("/home/v/Documents/20240229_082253.bag");
-            rs_config.enable_device_from_file("/home/v/Downloads/test4.bag");
-        }
-
-        rs2::pipeline rs_pipeline;
-        rs2::pipeline_profile rs_profile = rs_pipeline.start(rs_config);
 
         qDebug() << "started!";
 
         while (true) {
-            if (paused) continue;
+            loop_mutex.lock();
+            if (!paused) {
+                if (pipelineStarted) {
+                    rs2::frameset frameset = rs_pipeline.wait_for_frames();
 
-            std::unique_lock<std::mutex> lock(wait_for_frames_mutex);
-            rs2::frameset frameset = rs_pipeline.wait_for_frames();
+                    for (const rs2::frame& frame: frameset) {
+                        auto stream_type = frame.get_profile().stream_type();
+                        auto format = frame.get_profile().format();
 
-            for (const rs2::frame& frame: frameset) {
-                auto stream_type = frame.get_profile().stream_type();
-                auto format = frame.get_profile().format();
+                        if (stream_type == RS2_STREAM_DEPTH) {
+                            auto depth = frame.as<rs2::depth_frame>();
+                            auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+                            auto sensor = rs2::sensor_from_frame(depth);
+                            auto depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
+                            auto frame_width = depth.get_width();
+                            auto frame_height = depth.get_height();
+                            auto frame_size = frame_width * frame_height;
+                            auto depth_data = (uint16_t*)depth.get_data();
 
-                if (stream_type == RS2_STREAM_DEPTH) {
-                    auto depth = frame.as<rs2::depth_frame>();
-                    auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
-                    auto sensor = rs2::sensor_from_frame(depth);
-                    auto depth_units = sensor->get_option(RS2_OPTION_DEPTH_UNITS);
-                    auto frame_width = depth.get_width();
-                    auto frame_height = depth.get_height();
-                    auto frame_size = frame_width * frame_height;
-                    auto depth_data = (uint16_t*)depth.get_data();
+                            auto depth_copy = new uint16_t[frame_size];
+                            memcpy(depth_copy, depth_data, frame_size * sizeof(uint16_t));
+                            for (size_t i = 0; i < frame_size; i++)
+                                depth_copy[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, depth_min, depth_max);
+                            emit drawDepth(depth_copy, frame_width, frame_height, 90);
 
-                    auto depth_copy = new uint16_t[frame_size];
-                    memcpy(depth_copy, depth_data, frame_size * sizeof(uint16_t));
-                    for (size_t i = 0; i < frame_size; i++)
-                        depth_copy[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, depth_min, depth_max);
-                    emit drawDepth(depth_copy, frame_width, frame_height, 90);
+                            processDepth(depth_data, frame_width, frame_height, intr, depth_units);
 
-                    shape_t shape_original(frame_width, frame_height, depth_data, intr, depth_units);
 
-                    auto center_mass = shape_original.center_mass(depth_min, depth_max);
+                        } else if (stream_type == RS2_STREAM_COLOR) {
+                            auto color = frame.as<rs2::video_frame>();
+                            auto frame_width = color.get_width();
+                            auto frame_height = color.get_height();
+                            auto frame_size = frame_width * frame_height;
+                            auto color_data = (uint8_t*)color.get_data();
 
-                    auto avg_bot_right = shape_original.center_mass(
-                        frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
-                        frame_width,
-                        0,
-                        frame_height / 2,
-                        depth_min,
-                        depth_max
+                            auto color_copy = new uint8_t[frame_size * 3];
+                            memcpy(color_copy, color_data, frame_size * 3);
+                            emit drawColor(color_copy, frame_width, frame_height, 90);
+                        }
+                    }
+                } else if (loaded_distances) {
+                    processDepth(
+                        loaded_distances->data,
+                        loaded_distances->frame_width,
+                        loaded_distances->frame_height,
+                        loaded_intr,
+                        loaded_distances->depth_units
                     );
-
-                    auto avg_bot_left = shape_original.center_mass(
-                        frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
-                        frame_width,
-                        frame_height / 2,
-                        frame_height,
-                        depth_min,
-                        depth_max
-                        );
-
-                    auto avg_top_center = shape_original.center_mass(
-                        frame_width * guaranteed_floor,
-                        frame_width * (guaranteed_floor + (1 - guaranteed_floor) / 2),
-                        0,
-                        frame_height,
-                        depth_min,
-                        depth_max
-                    );
-
-
-                    rs2::vertex avg_bot_center;
-                    avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
-                    avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
-                    avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
-
-                    size_t* shape_original_render_map = new size_t[frame_size];
-                    std::fill_n(shape_original_render_map, frame_size, -1);
-                    emit drawRgb(
-                        "shape_original",
-                        shape_t(shape_original)
-                            .rotate(rotateA,rotateB,rotateC,center_mass)
-                            .colorize(depth_min, depth_max)
-                            .render(zoomScale, shape_original_render_map),
-                        frame_width,
-                        frame_height,
-                        90
-                    );
-
-                    // account for 90 degree rotation
-                    size_t lookat_y = (frame_height-1) - this->lookat_x * frame_height;
-                    size_t lookat_x = this->lookat_y * frame_width;
-                    size_t lookat_i = lookat_y * frame_width + lookat_x;
-                    float lookat_depth = std::numeric_limits<float>::quiet_NaN();
-                    if (shape_original_render_map[lookat_i] != -1)
-                        lookat_depth = shape_original.points[shape_original_render_map[lookat_i]].z;
-
-                    emit statusMessage(QString("Lookat (%1,%2) depth = %3").arg(lookat_x).arg(lookat_y).arg(lookat_depth));
-
-                    float rot1 = angle_between(avg_top_center.z, avg_top_center.x, avg_bot_center.z, avg_bot_center.x);
-                    auto avg_bot_right_2 = rotate(avg_bot_right, 0, -rot1, 0,center_mass);
-                    auto avg_bot_left_2 = rotate(avg_bot_left, 0, -rot1, 0,center_mass);
-                    float rot2 = PI - angle_between(avg_bot_right_2.y, avg_bot_right_2.x, avg_bot_left_2.y, avg_bot_left_2.x);
-
-                    shape_t shape_floored(shape_original);
-                    shape_floored.rotate(0,-rot1,-rot2,center_mass);
-
-                    emit drawRgb(
-                        "shape_floored",
-                        shape_t(shape_floored)
-                            .rotate(rotateA,rotateB,rotateC,center_mass)
-                            .colorize(depth_min, depth_max)
-                            .render(zoomScale),
-                        frame_width,
-                        frame_height,
-                        90
-                        );
-
-                    shape_t shape_topview(shape_floored);
-                    shape_topview.rotate(0,-PI/2,0,center_mass);
-
-                    emit drawRgb(
-                        "shape_topview",
-                        shape_t(shape_topview)
-                            .rotate(rotateA,rotateB,rotateC,center_mass)
-                            .colorize(depth_min, depth_max)
-                            .render(zoomScale),
-                        frame_width,
-                        frame_height,
-                        90
-                    );
-
-                    auto floor_level = rotate(avg_top_center,0,-PI/2-rot1,-rot2,center_mass);
-
-                    emit drawRgb(
-                        "shape_topview_floor",
-                        shape_t(shape_topview)
-                            .rotate(rotateA,rotateB,rotateC,center_mass)
-                            .colorize(depth_min, depth_max)
-                            .slice_z(floor_level.z - sliceEpsilon, floor_level.z + sliceEpsilon)
-                            .render(zoomScale),
-                        frame_width,
-                        frame_height,
-                        90
-                    );
-
-                    emit drawRgb(
-                        "shape_topview_box",
-                        shape_t(shape_topview)
-                            .rotate(rotateA,rotateB,rotateC,center_mass)
-                            .colorize(depth_min, depth_max)
-                            .slice_z(floor_level.z - boxHeight + sliceLevel - sliceEpsilon, floor_level.z - boxHeight + sliceLevel + sliceEpsilon)
-                            .render(zoomScale),
-                        frame_width,
-                        frame_height,
-                        90
-                    );
-
-                } else if (stream_type == RS2_STREAM_COLOR) {
-                    auto color = frame.as<rs2::video_frame>();
-                    auto frame_width = color.get_width();
-                    auto frame_height = color.get_height();
-                    auto frame_size = frame_width * frame_height;
-                    auto color_data = (uint8_t*)color.get_data();
-
-                    auto color_copy = new uint8_t[frame_size * 3];
-                    memcpy(color_copy, color_data, frame_size * 3);
-                    emit drawColor(color_copy, frame_width, frame_height, 90);
                 }
             }
 
+            loop_mutex.unlock();
+
+            this->msleep(10);
         }
 
+    }
+
+    void presentFromFiles(QString filename) {
+        std::filesystem::path distances_path = filename.toStdString();
+        std::filesystem::path intr_path = filename.replace("distances.bin", "intrinsics.bin").toStdString();
+        if (loaded_distances)
+            delete loaded_distances;
+        loaded_distances = new distances_t(distances_path);
+        load_from_file(intr_path, &loaded_intr, sizeof(rs2_intrinsics));
+    }
+
+    void processDepth(uint16_t *depth_data, size_t frame_width, size_t frame_height, rs2_intrinsics &intr, float depth_units) {
+        auto frame_size = frame_width * frame_height;
+
+        shape_t shape_original(frame_width, frame_height, depth_data, intr, depth_units);
+
+        auto center_mass = shape_original.center_mass(depth_min, depth_max);
+
+        auto avg_bot_right = shape_original.center_mass(
+            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+            frame_width,
+            0,
+            frame_height / 2,
+            depth_min,
+            depth_max
+            );
+
+        auto avg_bot_left = shape_original.center_mass(
+            frame_width*(guaranteed_floor + (1-guaranteed_floor)/2),
+            frame_width,
+            frame_height / 2,
+            frame_height,
+            depth_min,
+            depth_max
+            );
+
+        auto avg_top_center = shape_original.center_mass(
+            frame_width * guaranteed_floor,
+            frame_width * (guaranteed_floor + (1 - guaranteed_floor) / 2),
+            0,
+            frame_height,
+            depth_min,
+            depth_max
+            );
+
+
+        rs2::vertex avg_bot_center;
+        avg_bot_center.x = (avg_bot_left.x + avg_bot_right.x) / 2;
+        avg_bot_center.y = (avg_bot_left.y + avg_bot_right.y) / 2;
+        avg_bot_center.z = (avg_bot_left.z + avg_bot_right.z) / 2;
+
+        size_t* shape_original_render_map = new size_t[frame_size];
+        std::fill_n(shape_original_render_map, frame_size, -1);
+        emit drawRgb(
+            "shape_original",
+            shape_t(shape_original)
+                .rotate(rotateA,rotateB,rotateC,center_mass)
+                .colorize(depth_min, depth_max)
+                .render(zoomScale, shape_original_render_map),
+            frame_width,
+            frame_height,
+            90
+            );
+
+        // account for 90 degree rotation
+        size_t lookat_y = (frame_height-1) - this->lookat_x * frame_height;
+        size_t lookat_x = this->lookat_y * frame_width;
+        size_t lookat_i = lookat_y * frame_width + lookat_x;
+        float lookat_depth = std::numeric_limits<float>::quiet_NaN();
+        if (shape_original_render_map[lookat_i] != -1)
+            lookat_depth = shape_original.points[shape_original_render_map[lookat_i]].z;
+        delete[] shape_original_render_map;
+
+        emit statusMessage(QString("Lookat (%1,%2) depth = %3").arg(lookat_x).arg(lookat_y).arg(lookat_depth));
+
+        float rot1 = angle_between(avg_top_center.z, avg_top_center.x, avg_bot_center.z, avg_bot_center.x);
+        auto avg_bot_right_2 = rotate(avg_bot_right, 0, -rot1, 0,center_mass);
+        auto avg_bot_left_2 = rotate(avg_bot_left, 0, -rot1, 0,center_mass);
+        float rot2 = PI - angle_between(avg_bot_right_2.y, avg_bot_right_2.x, avg_bot_left_2.y, avg_bot_left_2.x);
+
+        shape_t shape_floored(shape_original);
+        shape_floored.rotate(0,-rot1,-rot2,center_mass);
+
+        emit drawRgb(
+            "shape_floored",
+            shape_t(shape_floored)
+                .rotate(rotateA,rotateB,rotateC,center_mass)
+                .colorize(depth_min, depth_max)
+                .render(zoomScale),
+            frame_width,
+            frame_height,
+            90
+            );
+
+        shape_t shape_topview(shape_floored);
+        shape_topview.rotate(0,-PI/2,0,center_mass);
+
+        emit drawRgb(
+            "shape_topview",
+            shape_t(shape_topview)
+                .rotate(rotateA,rotateB,rotateC,center_mass)
+                .colorize(depth_min, depth_max)
+                .render(zoomScale),
+            frame_width,
+            frame_height,
+            90
+            );
+
+        auto floor_level = rotate(avg_top_center,0,-PI/2-rot1,-rot2,center_mass);
+
+        emit drawRgb(
+            "shape_topview_floor",
+            shape_t(shape_topview)
+                .rotate(rotateA,rotateB,rotateC,center_mass)
+                .colorize(depth_min, depth_max)
+                .slice_z(floor_level.z - sliceEpsilon, floor_level.z + sliceEpsilon)
+                .render(zoomScale),
+            frame_width,
+            frame_height,
+            90
+            );
+
+        emit drawRgb(
+            "shape_topview_box",
+            shape_t(shape_topview)
+                .rotate(rotateA,rotateB,rotateC,center_mass)
+                .colorize(depth_min, depth_max)
+                .slice_z(floor_level.z - boxHeight + sliceLevel - sliceEpsilon, floor_level.z - boxHeight + sliceLevel + sliceEpsilon)
+                .render(zoomScale),
+            frame_width,
+            frame_height,
+            90
+            );
     }
 };
 

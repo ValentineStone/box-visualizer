@@ -347,8 +347,26 @@
      <height>25</height>
     </rect>
    </property>
+   <widget class="QMenu" name="menuFile">
+    <property name="title">
+     <string>File</string>
+    </property>
+    <addaction name="actionView_from_camera"/>
+    <addaction name="actionLoad_from_file"/>
+   </widget>
+   <addaction name="menuFile"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
+  <action name="actionView_from_camera">
+   <property name="text">
+    <string>View from camera</string>
+   </property>
+  </action>
+  <action name="actionLoad_from_file">
+   <property name="text">
+    <string>Load from file</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>
