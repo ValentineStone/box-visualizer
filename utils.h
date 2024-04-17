@@ -13,6 +13,7 @@
 #include <QDebug>
 #include <filesystem>
 #include <fstream>
+#include "omp.h"
 
 #ifndef PI
 #define PI  3.14159265358979323846
@@ -179,8 +180,6 @@ struct shape_t {
         size = width * height;
         points = new Point[size];
         colors = new Color[size];
-        memset(points, 0, size * sizeof(Point));
-        memset(colors, 0, size * sizeof(Color));
         if (_points)
             memcpy(points, _points, size * sizeof(Point));
     }
@@ -188,11 +187,11 @@ struct shape_t {
     shape_t(size_t _width, size_t _height, uint16_t* depths, const rs2_intrinsics& intr, float depth_units):
         shape_t(_width, _height, nullptr)
     {
-        for (size_t y = 0; y < height; y++) {
-            for (size_t x = 0; x < width; x++) {
-                auto i = y * width + x;
-                pixel_to_point(points[i], &intr, x, y, depths[i] * depth_units);
-            }
+#pragma omp parallel for
+        for (size_t i = 0; i < size; i++) {
+            auto y = i / width;
+            auto x = i % width;
+            pixel_to_point(points[i], &intr, x, y, depths[i] * depth_units);
         }
     }
 
@@ -210,6 +209,7 @@ struct shape_t {
         float cosB = cos(b);
         float sinC = sin(c);
         float cosC = cos(c);
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++) {
             float x = points[i].x;
             float y = points[i].y;
@@ -228,6 +228,7 @@ struct shape_t {
         float cosB = cos(b);
         float sinC = sin(c);
         float cosC = cos(c);
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++) {
             float x = points[i].x -= around.x;
             float y = points[i].y -= around.y;
@@ -240,6 +241,7 @@ struct shape_t {
     }
 
     shape_t&  colorize(float z_min, float z_max) {
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++)
             colors[i] = to_grayscale<uint8_t>(points[i].z, z_min, z_max);
         return *this;
@@ -249,6 +251,7 @@ struct shape_t {
     uint8_t* render(float scale = 1, size_t* render_map = nullptr) const {
         Pixel* pixels = (Pixel*)new uint8_t[size * sizeof(Pixel)];
         memset(pixels, 0, size * sizeof(Pixel));
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++) {
             auto& point = points[i];
             size_t x = point.x * scale * width/2 + width/2;
@@ -297,6 +300,7 @@ struct shape_t {
     }
 
     shape_t& slice_x(float min, float max) {
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++)
             if (points[i].x < min || points[i].x > max)
                 colors[i] = 0;
@@ -304,6 +308,7 @@ struct shape_t {
     }
 
     shape_t& slice_y(float min, float max) {
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++)
             if (points[i].y < min || points[i].y > max)
                 colors[i] = 0;
@@ -311,6 +316,7 @@ struct shape_t {
     }
 
     shape_t& slice_z(float min, float max) {
+#pragma omp parallel for
         for (size_t i = 0; i < size; i++)
             if (points[i].z < min || points[i].z > max)
                 colors[i] = 0;
@@ -479,7 +485,7 @@ public:
         if (dataSource == "live") {
             rs2::config rs_config;
             //rs_config.enable_stream(RS2_STREAM_COLOR, 320, 240, RS2_FORMAT_RGB8, 30); // 1920, 1080
-            rs_config.enable_stream(RS2_STREAM_DEPTH, 320, 240, RS2_FORMAT_Z16, 30);   // 1024, 768
+            rs_config.enable_stream(RS2_STREAM_DEPTH, 1024, 768, RS2_FORMAT_Z16, 30);   // 1024, 768
             //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
             //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
 
@@ -512,9 +518,6 @@ private:
     bool pipelineStarted = false;
 
     void run() override {
-
-        qDebug() << "started!";
-
         while (true) {
             loop_mutex.lock();
             if (!paused) {
@@ -536,7 +539,7 @@ private:
                             auto depth_data = (uint16_t*)depth.get_data();
 
                             auto depth_copy = new uint16_t[frame_size];
-                            memcpy(depth_copy, depth_data, frame_size * sizeof(uint16_t));
+#pragma omp parallel for
                             for (size_t i = 0; i < frame_size; i++)
                                 depth_copy[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, depth_min, depth_max);
                             emit drawDepth(depth_copy, frame_width, frame_height, 90);
@@ -664,7 +667,7 @@ private:
             frame_width,
             frame_height,
             90
-            );
+        );
 
         shape_t shape_topview(shape_floored);
         shape_topview.rotate(0,-PI/2,0,center_mass);
@@ -678,7 +681,7 @@ private:
             frame_width,
             frame_height,
             90
-            );
+        );
 
         auto floor_level = rotate(avg_top_center,0,-PI/2-rot1,-rot2,center_mass);
 
@@ -692,7 +695,7 @@ private:
             frame_width,
             frame_height,
             90
-            );
+        );
 
         emit drawRgb(
             "shape_topview_box",
@@ -704,7 +707,7 @@ private:
             frame_width,
             frame_height,
             90
-            );
+        );
     }
 };
 
