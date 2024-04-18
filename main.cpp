@@ -477,12 +477,15 @@ struct WorkerThread {
             delete loaded_distances;
         loaded_distances = nullptr;
 
-        if (dataSource == "live") {
+        if (dataSource.starts_with("depth")) {
             rs2::config rs_config;
             //rs_config.enable_stream(RS2_STREAM_COLOR, 320, 240, RS2_FORMAT_RGB8, 30); // 1920, 1080
-            rs_config.enable_stream(RS2_STREAM_DEPTH, 1024, 768, RS2_FORMAT_Z16, 30);   // 1024, 768
-            //rs_config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
-            //rs_config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
+            if (dataSource.ends_with(":l"))
+                rs_config.enable_stream(RS2_STREAM_DEPTH, 1024, 768, RS2_FORMAT_Z16, 30);
+            else if (dataSource.ends_with(":s"))
+                rs_config.enable_stream(RS2_STREAM_DEPTH, 320, 240, RS2_FORMAT_Z16, 30);
+            else
+                rs_config.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
 
             rs_profile = rs_pipeline.start(rs_config);
             pipelineStarted = true;
