@@ -458,7 +458,7 @@ struct WorkerThread {
     float lookat_x = 0;
     float lookat_y = 0;
 
-    float sliceEpsilon = 0.1;
+    float sliceEpsilon = 0.05;
     float guaranteed_floor = 0.9;
 
     float depth_min = 0.5;
