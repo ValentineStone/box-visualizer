@@ -461,7 +461,7 @@ struct WorkerThread {
     float sliceEpsilon = 0.05;
     float guaranteed_floor = 0.9;
 
-    float depth_min = 0.5;
+    float depth_min = 0.4;
     float depth_max = 5;
 
     distances_t* loaded_distances = nullptr;
@@ -534,6 +534,77 @@ struct WorkerThread {
                             for (size_t i = 0; i < frame_size; i++)
                                 depth_copy[i] = to_grayscale<uint16_t>(depth_data[i] * depth_units, depth_min, depth_max);
                             drawDepth(depth_copy, frame_width, frame_height, 90);
+
+
+                            auto depth_copy2 = new uint16_t[frame_size];
+
+                            float* depth_deltas = new float[frame_width];
+                            float* depth_averages = new float[frame_width];
+                            bool* line_validity = new bool[frame_width];
+                            float target_delta_drop = 0.15;
+
+                            for (size_t x = frame_width - 1; x > 0; x--) {
+                                float depth_avg = 0;
+                                size_t depth_avg_n = 0;
+                                float d_min = std::numeric_limits<float>::max();
+                                float d_max = std::numeric_limits<float>::min();
+                                for (size_t y = frame_height/5; y < frame_height/5*4; y++) {
+                                    size_t i = y * frame_width + x;
+                                    float depth = depth_data[i] * depth_units;
+                                    if (depth > depth_min && depth < 2) {
+                                        depth_avg_n++;
+                                        depth_avg += depth;
+                                        if (depth < d_min)
+                                            d_min = depth;
+                                        if (depth > d_max)
+                                            d_max = depth;
+                                    }
+                                }
+                                float depth_dlt;
+                                if (depth_avg_n) {
+                                    depth_avg /= depth_avg_n;
+                                    depth_dlt = d_max - d_min;
+                                    line_validity[x] = true;
+                                } else {
+                                    depth_avg = -1;
+                                    depth_dlt = -1;
+                                    line_validity[x] = false;
+                                }
+                                depth_averages[x] = depth_avg;
+                                depth_deltas[x] = depth_dlt;
+
+                            }
+
+                            size_t line_x = 0;
+                            size_t line_x_counter = 0;
+                            for (size_t x = frame_width - 1; x > 0; x--) {
+                                if (line_validity[x]) {
+                                    if (depth_deltas[x] >= target_delta_drop) {
+                                        line_x_counter++;
+                                        if (line_x_counter > 10) {
+                                            line_x = x;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            float line_depth = depth_averages[line_x];
+                            float pallet_face_thickness = 0.04;
+
+                            for (size_t x = 0; x < frame_width; x++) {
+                                for (size_t y = 0; y < frame_height; y++) {
+                                    size_t i = y * frame_width + x;
+                                    uint16_t color1 = to_grayscale<uint16_t>(depth_data[i] * depth_units, line_depth-pallet_face_thickness, line_depth+pallet_face_thickness);
+                                    depth_copy2[i] = color1;
+                                }
+                            }
+
+                            delete[] depth_deltas;
+                            delete[] depth_averages;
+                            delete[] line_validity;
+
+                            drawDepth2(depth_copy2, frame_width, frame_height, 90);
 
                             processDepth(depth_data, frame_width, frame_height, intr, depth_units);
 
@@ -620,7 +691,7 @@ struct WorkerThread {
 
         size_t* shape_original_render_map = new size_t[frame_size];
         std::fill_n(shape_original_render_map, frame_size, -1);
-        drawRgb(
+        if (false) drawRgb(
             "shape_original",
             shape_t(shape_original)
                 .rotate(rotateA,rotateB,rotateC,center_mass)
@@ -652,7 +723,7 @@ struct WorkerThread {
         shape_t shape_floored(shape_original);
         shape_floored.rotate(0,-rot1,-rot2,center_mass);
 
-        drawRgb(
+        if (false) drawRgb(
             "shape_floored",
             shape_t(shape_floored)
                 .rotate(rotateA,rotateB,rotateC,center_mass)
@@ -666,7 +737,7 @@ struct WorkerThread {
         shape_t shape_topview(shape_floored);
         shape_topview.rotate(0,-PI/2,0,center_mass);
 
-        drawRgb(
+        if (false) drawRgb(
             "shape_topview",
             shape_t(shape_topview)
                 .rotate(rotateA,rotateB,rotateC,center_mass)
@@ -679,7 +750,7 @@ struct WorkerThread {
 
         auto floor_level = rotate(avg_top_center,0,-PI/2-rot1,-rot2,center_mass);
 
-        drawRgb(
+        if (false) drawRgb(
             "shape_topview_floor",
             shape_t(shape_topview)
                 .rotate(rotateA,rotateB,rotateC,center_mass)
@@ -691,7 +762,7 @@ struct WorkerThread {
             90
         );
 
-        drawRgb(
+        if (false) drawRgb(
             "shape_topview_box",
             shape_t(shape_topview)
                 .rotate(rotateA,rotateB,rotateC,center_mass)
@@ -708,6 +779,12 @@ struct WorkerThread {
         cv::Mat img(cv::Size(width, height), CV_16UC1, (void*)data, cv::Mat::AUTO_STEP);
         cv::namedWindow("Depth");
         cv::imshow("Depth", img);
+        delete[] data;
+    }
+    void drawDepth2(uint16_t* data, size_t width, size_t height, int rotate = 0) {
+        cv::Mat img(cv::Size(width, height), CV_16UC1, (void*)data, cv::Mat::AUTO_STEP);
+        cv::namedWindow("Depth2");
+        cv::imshow("Depth2", img);
         delete[] data;
     }
     void drawColor(uint8_t* data, size_t width, size_t height, int rotate = 0) {
